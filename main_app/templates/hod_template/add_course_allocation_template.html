@@ -1,0 +1,89 @@
+{% extends 'main_app/base.html' %}
+{% load static %}
+
+{% block page_title %} {{page_title}} {% endblock page_title %}
+
+{% block content %}
+<div class="content-header">
+    <div class="container-fluid">
+        <div class="row mb-2">
+            <div class="col-sm-6">
+                <h1 class="m-0 text-dark">{{ page_title }}</h1>
+            </div>
+        </div>
+    </div>
+</div>
+
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-md-8 offset-md-2">
+                <div class="card card-primary">
+                    <div class="card-header">
+                        <h3 class="card-title">{{ page_title }}</h3>
+                    </div>
+                    <form method="POST" enctype="multipart/form-data">
+                        {% csrf_token %}
+                        <div class="card-body">
+                            {% if form.non_field_errors %}
+                            <div class="alert alert-danger">
+                                {{ form.non_field_errors }}
+                            </div>
+                            {% endif %}
+
+                            <div class="form-group">
+                                <label for="{{ form.subject.id_for_label }}">{{ form.subject.label }}</label>
+                                {{ form.subject }}
+                                {% if form.subject.errors %}
+                                    <div class="invalid-feedback d-block">
+                                        {{ form.subject.errors }}
+                                    </div>
+                                {% endif %}
+                            </div>
+
+                            <div class="form-group">
+                                <label for="{{ form.course.id_for_label }}">{{ form.course.label }}</label>
+                                {{ form.course }}
+                                {% if form.course.errors %}
+                                    <div class="invalid-feedback d-block">
+                                        {{ form.course.errors }}
+                                    </div>
+                                {% endif %}
+                            </div>
+
+                            <div class="form-group">
+                                <label for="{{ form.session.id_for_label }}">{{ form.session.label }}</label>
+                                {{ form.session }}
+                                {% if form.session.errors %}
+                                    <div class="invalid-feedback d-block">
+                                        {{ form.session.errors }}
+                                    </div>
+                                {% endif %}
+                            </div>
+
+                            <div class="form-group">
+                                <label for="{{ form.staff.id_for_label }}">{{ form.staff.label }}</label>
+                                {{ form.staff }}
+                                {% if form.staff.errors %}
+                                    <div class="invalid-feedback d-block">
+                                        {{ form.staff.errors }}
+                                    </div>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="card-footer">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="fas fa-save"></i> Save
+                            </button>
+                            <a href="{% url 'manage_course_allocation' %}" class="btn btn-secondary">
+                                <i class="fas fa-arrow-left"></i> Back
+                            </a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}

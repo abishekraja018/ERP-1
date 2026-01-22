@@ -1,0 +1,90 @@
+{% extends 'main_app/base.html' %}
+{% load static %}
+
+{% block page_title %} {{page_title}} {% endblock page_title %}
+
+{% block content %}
+<div class="content-header">
+    <div class="container-fluid">
+        <div class="row mb-2">
+            <div class="col-sm-6">
+                <h1 class="m-0 text-dark">{{ page_title }}</h1>
+            </div>
+        </div>
+    </div>
+</div>
+
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">All Course Allocations</h3>
+                        <div class="card-tools">
+                            <a href="{% url 'add_course_allocation' %}" class="btn btn-primary btn-sm">
+                                <i class="fas fa-plus"></i> Add New Allocation
+                            </a>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        {% if allocations %}
+                        <div class="table-responsive">
+                            <table class="table table-striped table-hover">
+                                <thead class="bg-primary">
+                                    <tr>
+                                        <th>#</th>
+                                        <th>Subject</th>
+                                        <th>Course</th>
+                                        <th>Session</th>
+                                        <th>Staff</th>
+                                        <th>Students Assigned</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for allocation in allocations %}
+                                    <tr>
+                                        <td>{{ forloop.counter }}</td>
+                                        <td>{{ allocation.subject.name }}</td>
+                                        <td>{{ allocation.course.name }}</td>
+                                        <td>{{ allocation.session }}</td>
+                                        <td>{{ allocation.staff.admin.first_name }} {{ allocation.staff.admin.last_name }}</td>
+                                        <td>
+                                            <span class="badge badge-info">
+                                                {{ allocation.students.count }}
+                                            </span>
+                                        </td>
+                                        <td>
+                                            <a href="{% url 'assign_students_allocation' allocation.id %}" 
+                                               class="btn btn-sm btn-info" title="Assign Students">
+                                                <i class="fas fa-users"></i>
+                                            </a>
+                                            <a href="{% url 'edit_course_allocation' allocation.id %}" 
+                                               class="btn btn-sm btn-warning" title="Edit">
+                                                <i class="fas fa-edit"></i>
+                                            </a>
+                                            <a href="{% url 'delete_course_allocation' allocation.id %}" 
+                                               class="btn btn-sm btn-danger" title="Delete"
+                                               onclick="return confirm('Are you sure?')">
+                                                <i class="fas fa-trash"></i>
+                                            </a>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% else %}
+                        <div class="alert alert-info">
+                            <i class="fas fa-info-circle"></i> No course allocations found. 
+                            <a href="{% url 'add_course_allocation' %}">Create one now</a>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+{% endblock content %}
