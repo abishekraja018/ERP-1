@@ -34,8 +34,8 @@
                                             <h5 class="card-title">{{ event.title }}</h5>
                                         </div>
                                         <div class="card-body">
-                                            <p><strong>Date & Time:</strong> {{ event.date|date:"d-m-Y H:i" }}</p>
-                                            <p><strong>Location:</strong> {{ event.location }}</p>
+                                            <p><strong>Date & Time:</strong> {{ event.start_datetime|date:"d-m-Y H:i" }}</p>
+                                            <p><strong>Location:</strong> {{ event.venue }}</p>
                                             <p><strong>Description:</strong></p>
                                             <p>{{ event.description|truncatewords:30 }}</p>
                                         </div>

@@ -1,33 +1,81 @@
+"""
+Anna University CSE Department ERP System
+Faculty (Staff) Views
+"""
+
 import json
+from datetime import date, datetime
 
 from django.contrib import messages
+from django.contrib.auth.decorators import login_required
 from django.core.files.storage import FileSystemStorage
 from django.http import HttpResponse, JsonResponse
-from django.shortcuts import (HttpResponseRedirect, get_object_or_404,redirect, render)
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.views.decorators.csrf import csrf_exempt
+from django.db.models import Count
 
-from .forms import *
-from .models import *
-from . import forms, models
+from .forms import (
+    LeaveRequestForm, FeedbackForm, PublicationForm, 
+    FacultyProfileEditForm, AccountUserForm, BulkAttendanceForm,
+    QuestionPaperSubmissionForm
+)
+from .models import (
+    Account_User, Faculty_Profile, Student_Profile, Course_Assignment,
+    Attendance, LeaveRequest, Feedback, Notification, Publication,
+    Announcement, AcademicYear, Semester, QuestionPaperAssignment
+)
 from .utils.web_scrapper import fetch_acoe_updates
 from .utils.cir_scrapper import fetch_cir_ticker_announcements
-from datetime import date
 
+
+def check_faculty_permission(user):
+    """Check if user is Faculty or Guest Faculty"""
+    return user.is_authenticated and user.role in ['FACULTY', 'GUEST']
+
+
+# =============================================================================
+# DASHBOARD
+# =============================================================================
+
+@login_required
 def staff_home(request):
-    staff = get_object_or_404(Staff, admin=request.user)
-    total_students = Student.objects.filter(course=staff.course).count()
-    total_leave = LeaveReportStaff.objects.filter(staff=staff).count()
-    subjects = Subject.objects.filter(staff=staff)
-    total_subject = subjects.count()
-    attendance_list = Attendance.objects.filter(subject__in=subjects)
-    total_attendance = attendance_list.count()
-    attendance_list = []
-    subject_list = []
-    for subject in subjects:
-        attendance_count = Attendance.objects.filter(subject=subject).count()
-        subject_list.append(subject.name)
-        attendance_list.append(attendance_count)
+    """Faculty Dashboard"""
+    if not check_faculty_permission(request.user):
+        messages.error(request, "Access Denied. Faculty privileges required.")
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    
+    # Get assigned courses
+    assignments = Course_Assignment.objects.filter(faculty=faculty, is_active=True)
+    total_courses = assignments.count()
+    
+    # Count students across all assigned batches
+    total_students = 0
+    for assignment in assignments:
+        student_count = Student_Profile.objects.filter(batch_label=assignment.batch_label).count()
+        total_students += student_count
+    
+    # Leave and attendance stats
+    total_leaves = LeaveRequest.objects.filter(user=request.user).count()
+    pending_leaves = LeaveRequest.objects.filter(user=request.user, status='PENDING').count()
+    
+    # Attendance stats per course
+    course_list = []
+    attendance_count_list = []
+    for assignment in assignments:
+        attendance_count = Attendance.objects.filter(assignment=assignment).count()
+        course_list.append(assignment.course.title[:15])
+        attendance_count_list.append(attendance_count)
+    
+    # Publications
+    publications = Publication.objects.filter(faculty=faculty)
+    total_publications = publications.count()
+    unverified_publications = publications.filter(is_verified=False).count()
+    
+    # Notifications
+    notifications = Notification.objects.filter(recipient=request.user, is_read=False)[:5]
     
     # Fetch announcements
     announcements = []
@@ -43,228 +91,368 @@ def staff_home(request):
     except:
         pass
     
+    # Department announcements
+    dept_announcements = Announcement.objects.filter(
+        is_active=True, 
+        audience__in=['ALL', 'FACULTY']
+    )[:5]
+    
     context = {
-        'page_title': 'Staff Panel - ' + str(staff.admin.first_name) + ' ' + str(staff.admin.last_name[0]) + '' + ' (' + str(staff.course) + ')',
+        'page_title': f'Faculty Dashboard - {faculty.user.full_name}',
+        'faculty': faculty,
+        'total_courses': total_courses,
         'total_students': total_students,
-        'total_attendance': total_attendance,
-        'total_leave': total_leave,
-        'total_subject': total_subject,
-        'subject_list': subject_list,
-        'attendance_list': attendance_list,
-        'announcements': announcements
+        'total_leaves': total_leaves,
+        'pending_leaves': pending_leaves,
+        'course_list': json.dumps(course_list),
+        'attendance_count_list': json.dumps(attendance_count_list),
+        'total_publications': total_publications,
+        'unverified_publications': unverified_publications,
+        'notifications': notifications,
+        'announcements': announcements,
+        'dept_announcements': dept_announcements,
+        'assignments': assignments,
     }
     return render(request, 'staff_template/home_content.html', context)
 
 
+# =============================================================================
+# ATTENDANCE MANAGEMENT
+# =============================================================================
+
+@login_required
 def staff_take_attendance(request):
-    staff = get_object_or_404(Staff, admin=request.user)
-    subjects = Subject.objects.filter(staff_id=staff)
-    sessions = Session.objects.all()
+    """Take attendance for assigned courses"""
+    if not check_faculty_permission(request.user):
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    assignments = Course_Assignment.objects.filter(faculty=faculty, is_active=True)
+    
     context = {
-        'subjects': subjects,
-        'sessions': sessions,
+        'assignments': assignments,
         'page_title': 'Take Attendance'
     }
-
     return render(request, 'staff_template/staff_take_attendance.html', context)
 
 
 @csrf_exempt
+@login_required
 def get_students(request):
-    subject_id = request.POST.get('subject')
-    session_id = request.POST.get('session')
+    """Get students for a course assignment"""
+    if not check_faculty_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    assignment_id = request.POST.get('assignment')
     try:
-        subject = get_object_or_404(Subject, id=subject_id)
-        session = get_object_or_404(Session, id=session_id)
-        students = Student.objects.filter(
-            course_id=subject.course.id, session=session)
+        assignment = get_object_or_404(Course_Assignment, id=assignment_id)
+        
+        # Get students matching the batch label
+        students = Student_Profile.objects.filter(batch_label=assignment.batch_label).select_related('user')
+        
         student_data = []
         for student in students:
             data = {
-                    "id": student.id,
-                    "name": student.admin.last_name + " " + student.admin.first_name
-                    }
+                "id": str(student.id),
+                "name": student.user.full_name,
+                "register_no": student.register_no
+            }
             student_data.append(data)
+        
         return JsonResponse(json.dumps(student_data), content_type='application/json', safe=False)
     except Exception as e:
-        return e
+        return JsonResponse({'error': str(e)}, status=400)
 
 
 @csrf_exempt
+@login_required
 def save_attendance(request):
+    """Save attendance records"""
+    if not check_faculty_permission(request.user):
+        return HttpResponse("Permission denied", status=403)
+    
     student_data = request.POST.get('student_ids')
-    date = request.POST.get('date')
-    subject_id = request.POST.get('subject')
-    session_id = request.POST.get('session')
+    attendance_date = request.POST.get('date')
+    assignment_id = request.POST.get('assignment')
+    period = request.POST.get('period', 1)
+    
     students = json.loads(student_data)
+    
     try:
-        session = get_object_or_404(Session, id=session_id)
-        subject = get_object_or_404(Subject, id=subject_id)
-        attendance = Attendance(session=session, subject=subject, date=date)
-        attendance.save()
-
+        assignment = get_object_or_404(Course_Assignment, id=assignment_id)
+        
         for student_dict in students:
-            student = get_object_or_404(Student, id=student_dict.get('id'))
-            attendance_report = AttendanceReport(student=student, attendance=attendance, status=student_dict.get('status'))
-            attendance_report.save()
+            student = get_object_or_404(Student_Profile, id=student_dict.get('id'))
+            
+            # Check if attendance already exists
+            attendance, created = Attendance.objects.update_or_create(
+                student=student,
+                assignment=assignment,
+                date=attendance_date,
+                period=period,
+                defaults={
+                    'status': 'PRESENT' if student_dict.get('status') else 'ABSENT'
+                }
+            )
+        
+        return HttpResponse("OK")
     except Exception as e:
-        return None
-
-    return HttpResponse("OK")
+        return HttpResponse(f"Error: {str(e)}", status=400)
 
 
+@login_required
 def staff_update_attendance(request):
-    staff = get_object_or_404(Staff, admin=request.user)
-    subjects = Subject.objects.filter(staff_id=staff)
-    sessions = Session.objects.all()
+    """Update attendance records"""
+    if not check_faculty_permission(request.user):
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    assignments = Course_Assignment.objects.filter(faculty=faculty, is_active=True)
+    
     context = {
-        'subjects': subjects,
-        'sessions': sessions,
+        'assignments': assignments,
         'page_title': 'Update Attendance'
     }
-
     return render(request, 'staff_template/staff_update_attendance.html', context)
 
 
 @csrf_exempt
+@login_required
 def get_student_attendance(request):
+    """Get attendance data for editing"""
+    if not check_faculty_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    assignment_id = request.POST.get('assignment')
     attendance_date_id = request.POST.get('attendance_date_id')
+    period = request.POST.get('period', 1)
+    
     try:
-        date = get_object_or_404(Attendance, id=attendance_date_id)
-        attendance_data = AttendanceReport.objects.filter(attendance=date)
+        assignment = get_object_or_404(Course_Assignment, id=assignment_id)
+        
+        # Get the date from attendance record
+        attendance_record = Attendance.objects.filter(id=attendance_date_id).first()
+        if attendance_record:
+            attendance_date = attendance_record.date
+        else:
+            return JsonResponse(json.dumps([]), content_type='application/json', safe=False)
+        
+        # Get students for this batch
+        students = Student_Profile.objects.filter(batch_label=assignment.batch_label).select_related('user')
+        
         student_data = []
-        for attendance in attendance_data:
-            data = {"id": attendance.student.admin.id,
-                    "name": attendance.student.admin.last_name + " " + attendance.student.admin.first_name,
-                    "status": attendance.status}
+        for student in students:
+            # Check if attendance exists
+            try:
+                attendance = Attendance.objects.get(
+                    student=student, 
+                    assignment=assignment,
+                    date=attendance_date,
+                    period=period
+                )
+                status = attendance.status == 'PRESENT'
+            except Attendance.DoesNotExist:
+                status = False
+            
+            data = {
+                "id": str(student.id),
+                "name": student.user.full_name,
+                "register_no": student.register_no,
+                "status": status
+            }
             student_data.append(data)
+        
         return JsonResponse(json.dumps(student_data), content_type='application/json', safe=False)
     except Exception as e:
-        return e
+        return JsonResponse({'error': str(e)}, status=400)
 
 
 @csrf_exempt
+@login_required
 def update_attendance(request):
+    """Update existing attendance records"""
+    if not check_faculty_permission(request.user):
+        return HttpResponse("Permission denied", status=403)
+    
     student_data = request.POST.get('student_ids')
-    date = request.POST.get('date')
+    attendance_date_id = request.POST.get('date')
+    assignment_id = request.POST.get('assignment')
+    period = request.POST.get('period', 1)
+    
     students = json.loads(student_data)
+    
     try:
-        attendance = get_object_or_404(Attendance, id=date)
-
+        assignment = get_object_or_404(Course_Assignment, id=assignment_id)
+        
+        # Get the date from attendance record
+        attendance_record = Attendance.objects.filter(id=attendance_date_id).first()
+        if attendance_record:
+            attendance_date = attendance_record.date
+        else:
+            return HttpResponse("Invalid attendance record", status=400)
+        
         for student_dict in students:
-            student = get_object_or_404(
-                Student, admin_id=student_dict.get('id'))
-            attendance_report = get_object_or_404(AttendanceReport, student=student, attendance=attendance)
-            attendance_report.status = student_dict.get('status')
-            attendance_report.save()
+            student = get_object_or_404(Student_Profile, id=student_dict.get('id'))
+            
+            Attendance.objects.update_or_create(
+                student=student,
+                assignment=assignment,
+                date=attendance_date,
+                period=period,
+                defaults={
+                    'status': 'PRESENT' if student_dict.get('status') else 'ABSENT'
+                }
+            )
+        
+        return HttpResponse("OK")
     except Exception as e:
-        return None
-
-    return HttpResponse("OK")
+        return HttpResponse(f"Error: {str(e)}", status=400)
 
 
+# =============================================================================
+# LEAVE MANAGEMENT
+# =============================================================================
+
+@login_required
 def staff_apply_leave(request):
-    form = LeaveReportStaffForm(request.POST or None)
-    staff = get_object_or_404(Staff, admin_id=request.user.id)
+    """Apply for leave"""
+    if not check_faculty_permission(request.user):
+        return redirect('/')
+    
+    form = LeaveRequestForm(request.POST or None, request.FILES or None)
+    leave_history = LeaveRequest.objects.filter(user=request.user).order_by('-created_at')
+    
     context = {
         'form': form,
-        'leave_history': LeaveReportStaff.objects.filter(staff=staff),
+        'leave_history': leave_history,
         'page_title': 'Apply for Leave'
     }
+    
     if request.method == 'POST':
         if form.is_valid():
             try:
-                obj = form.save(commit=False)
-                obj.staff = staff
-                obj.save()
-                messages.success(
-                    request, "Application for leave has been submitted for review")
+                leave = form.save(commit=False)
+                leave.user = request.user
+                leave.save()
+                messages.success(request, "Leave application submitted for review")
                 return redirect(reverse('staff_apply_leave'))
-            except Exception:
-                messages.error(request, "Could not apply!")
+            except Exception as e:
+                messages.error(request, f"Could not apply: {str(e)}")
         else:
-            messages.error(request, "Form has errors!")
+            messages.error(request, "Please correct the errors in the form")
+    
     return render(request, "staff_template/staff_apply_leave.html", context)
 
 
+# =============================================================================
+# FEEDBACK
+# =============================================================================
+
+@login_required
 def staff_feedback(request):
-    form = FeedbackStaffForm(request.POST or None)
-    staff = get_object_or_404(Staff, admin_id=request.user.id)
+    """Submit feedback"""
+    if not check_faculty_permission(request.user):
+        return redirect('/')
+    
+    form = FeedbackForm(request.POST or None)
+    feedbacks = Feedback.objects.filter(user=request.user).order_by('-created_at')
+    
     context = {
         'form': form,
-        'feedbacks': FeedbackStaff.objects.filter(staff=staff),
-        'page_title': 'Add Feedback'
+        'feedbacks': feedbacks,
+        'page_title': 'Submit Feedback'
     }
+    
     if request.method == 'POST':
         if form.is_valid():
             try:
-                obj = form.save(commit=False)
-                obj.staff = staff
-                obj.save()
-                messages.success(request, "Feedback submitted for review")
+                feedback = form.save(commit=False)
+                feedback.user = request.user
+                feedback.save()
+                messages.success(request, "Feedback submitted successfully")
                 return redirect(reverse('staff_feedback'))
-            except Exception:
-                messages.error(request, "Could not Submit!")
+            except Exception as e:
+                messages.error(request, f"Could not submit: {str(e)}")
         else:
-            messages.error(request, "Form has errors!")
+            messages.error(request, "Please correct the errors in the form")
+    
     return render(request, "staff_template/staff_feedback.html", context)
 
 
+# =============================================================================
+# PROFILE
+# =============================================================================
+
+@login_required
 def staff_view_profile(request):
-    staff = get_object_or_404(Staff, admin=request.user)
-    form = StaffEditForm(request.POST or None, request.FILES or None,instance=staff)
-    context = {'form': form, 'page_title': 'View/Update Profile'}
+    """View and update profile"""
+    if not check_faculty_permission(request.user):
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    user_form = AccountUserForm(request.POST or None, request.FILES or None, instance=request.user)
+    profile_form = FacultyProfileEditForm(request.POST or None, instance=faculty)
+    
+    context = {
+        'user_form': user_form,
+        'profile_form': profile_form,
+        'page_title': 'View/Update Profile'
+    }
+    
     if request.method == 'POST':
-        try:
-            if form.is_valid():
-                first_name = form.cleaned_data.get('first_name')
-                last_name = form.cleaned_data.get('last_name')
-                password = form.cleaned_data.get('password') or None
-                address = form.cleaned_data.get('address')
-                gender = form.cleaned_data.get('gender')
-                passport = request.FILES.get('profile_pic') or None
-                admin = staff.admin
-                if password != None:
-                    admin.set_password(password)
-                if passport != None:
+        if user_form.is_valid() and profile_form.is_valid():
+            try:
+                user = user_form.save(commit=False)
+                password = user_form.cleaned_data.get('password')
+                if password:
+                    user.set_password(password)
+                
+                if 'profile_pic' in request.FILES:
                     fs = FileSystemStorage()
-                    filename = fs.save(passport.name, passport)
-                    passport_url = fs.url(filename)
-                    admin.profile_pic = passport_url
-                admin.first_name = first_name
-                admin.last_name = last_name
-                admin.address = address
-                admin.gender = gender
-                admin.save()
-                staff.save()
+                    filename = fs.save(request.FILES['profile_pic'].name, request.FILES['profile_pic'])
+                    user.profile_pic = fs.url(filename)
+                
+                user.save()
+                profile_form.save()
                 messages.success(request, "Profile Updated!")
                 return redirect(reverse('staff_view_profile'))
-            else:
-                messages.error(request, "Invalid Data Provided")
-                return render(request, "staff_template/staff_view_profile.html", context)
-        except Exception as e:
-            messages.error(
-                request, "Error Occured While Updating Profile " + str(e))
-            return render(request, "staff_template/staff_view_profile.html", context)
-
+            except Exception as e:
+                messages.error(request, f"Error updating profile: {str(e)}")
+        else:
+            messages.error(request, "Invalid data provided")
+    
     return render(request, "staff_template/staff_view_profile.html", context)
 
 
+# =============================================================================
+# NOTIFICATIONS
+# =============================================================================
+
 @csrf_exempt
+@login_required
 def staff_fcmtoken(request):
+    """Update FCM token for push notifications"""
     token = request.POST.get('token')
     try:
-        staff_user = get_object_or_404(CustomUser, id=request.user.id)
-        staff_user.fcm_token = token
-        staff_user.save()
+        user = get_object_or_404(Account_User, id=request.user.id)
+        user.fcm_token = token
+        user.save()
         return HttpResponse("True")
     except Exception as e:
         return HttpResponse("False")
 
 
+@login_required
 def staff_view_notification(request):
-    staff = get_object_or_404(Staff, admin=request.user)
-    notifications = NotificationStaff.objects.filter(staff=staff)
+    """View notifications"""
+    if not check_faculty_permission(request.user):
+        return redirect('/')
+    
+    notifications = Notification.objects.filter(recipient=request.user).order_by('-created_at')
+    
+    # Mark as read
+    notifications.filter(is_read=False).update(is_read=True)
+    
     context = {
         'notifications': notifications,
         'page_title': "View Notifications"
@@ -272,104 +460,235 @@ def staff_view_notification(request):
     return render(request, "staff_template/staff_view_notification.html", context)
 
 
-def staff_add_result(request):
-    staff = get_object_or_404(Staff, admin=request.user)
-    subjects = Subject.objects.filter(staff=staff)
-    sessions = Session.objects.all()
+# =============================================================================
+# PUBLICATIONS
+# =============================================================================
+
+@login_required
+def staff_add_publication(request):
+    """Add new publication"""
+    if not check_faculty_permission(request.user):
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    form = PublicationForm(request.POST or None, request.FILES or None)
+    publications = Publication.objects.filter(faculty=faculty).order_by('-created_at')
+    
     context = {
-        'page_title': 'Result Upload',
-        'subjects': subjects,
-        'sessions': sessions
+        'form': form,
+        'publications': publications,
+        'page_title': 'Add Publication'
     }
+    
     if request.method == 'POST':
-        try:
-            student_id = request.POST.get('student_list')
-            subject_id = request.POST.get('subject')
-            test = request.POST.get('test')
-            exam = request.POST.get('exam')
-            student = get_object_or_404(Student, id=student_id)
-            subject = get_object_or_404(Subject, id=subject_id)
-            try:
-                data = StudentResult.objects.get(
-                    student=student, subject=subject)
-                data.exam = exam
-                data.test = test
-                data.save()
-                messages.success(request, "Scores Updated")
-            except:
-                result = StudentResult(student=student, subject=subject, test=test, exam=exam)
-                result.save()
-                messages.success(request, "Scores Saved")
-        except Exception as e:
-            messages.warning(request, "Error Occured While Processing Form")
-    return render(request, "staff_template/staff_add_result.html", context)
-
-
-@csrf_exempt
-def fetch_student_result(request):
-    try:
-        subject_id = request.POST.get('subject')
-        student_id = request.POST.get('student')
-        student = get_object_or_404(Student, id=student_id)
-        subject = get_object_or_404(Subject, id=subject_id)
-        result = StudentResult.objects.get(student=student, subject=subject)
-        result_data = {
-            'exam': result.exam,
-            'test': result.test
-        }
-        return HttpResponse(json.dumps(result_data))
-    except Exception as e:
-        return HttpResponse('False')
-
-#library
-def add_book(request):
-    if request.method == "POST":
-        name = request.POST['name']
-        author = request.POST['author']
-        isbn = request.POST['isbn']
-        category = request.POST['category']
-
-
-        books = Book.objects.create(name=name, author=author, isbn=isbn, category=category )
-        books.save()
-        alert = True
-        return render(request, "staff_template/add_book.html", {'alert':alert})
-    context = {
-        'page_title': "Add Book"
-    }
-    return render(request, "staff_template/add_book.html",context)
-
-#issue book
-
-
-def issue_book(request):
-    form = forms.IssueBookForm()
-    if request.method == "POST":
-        form = forms.IssueBookForm(request.POST)
         if form.is_valid():
-            obj = models.IssuedBook()
-            obj.student_id = request.POST['name2']
-            obj.isbn = request.POST['isbn2']
-            obj.save()
-            alert = True
-            return render(request, "staff_template/issue_book.html", {'obj':obj, 'alert':alert})
-    return render(request, "staff_template/issue_book.html", {'form':form})
+            try:
+                publication = form.save(commit=False)
+                publication.faculty = faculty
+                publication.save()
+                messages.success(request, "Publication added successfully. Pending verification.")
+                return redirect(reverse('staff_add_publication'))
+            except Exception as e:
+                messages.error(request, f"Could not add: {str(e)}")
+        else:
+            messages.error(request, "Please fill all required fields correctly")
+    
+    return render(request, "staff_template/staff_add_publication.html", context)
 
-def view_issued_book(request):
-    issuedBooks = IssuedBook.objects.all()
-    details = []
-    for i in issuedBooks:
-        days = (date.today()-i.issued_date)
-        d=days.days
-        fine=0
-        if d>14:
-            day=d-14
-            fine=day*5
-        books = list(models.Book.objects.filter(isbn=i.isbn))
-        # students = list(models.Student.objects.filter(admin=i.admin))
-        i=0
-        for l in books:
-            t=(books[i].name,books[i].isbn,issuedBooks[0].issued_date,issuedBooks[0].expiry_date,fine)
-            i=i+1
-            details.append(t)
-    return render(request, "staff_template/view_issued_book.html", {'issuedBooks':issuedBooks, 'details':details})
+
+@login_required
+def staff_view_publications(request):
+    """View all publications"""
+    if not check_faculty_permission(request.user):
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    publications = Publication.objects.filter(faculty=faculty).order_by('-created_at')
+    
+    context = {
+        'publications': publications,
+        'page_title': 'My Publications'
+    }
+    return render(request, "staff_template/staff_view_publications.html", context)
+
+
+# =============================================================================
+# VIEW STUDENTS
+# =============================================================================
+
+@login_required
+def staff_view_students(request):
+    """View students in assigned courses"""
+    if not check_faculty_permission(request.user):
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    assignments = Course_Assignment.objects.filter(faculty=faculty, is_active=True)
+    
+    # Get unique batch labels
+    batch_labels = assignments.values_list('batch_label', flat=True).distinct()
+    
+    # Get students in those batches
+    students = Student_Profile.objects.filter(batch_label__in=batch_labels).select_related('user', 'advisor')
+    
+    context = {
+        'students': students,
+        'assignments': assignments,
+        'page_title': 'View Students'
+    }
+    return render(request, "staff_template/staff_view_students.html", context)
+
+
+# =============================================================================
+# ATTENDANCE REPORTS
+# =============================================================================
+
+@login_required
+def staff_view_attendance_report(request):
+    """View attendance reports for assigned courses"""
+    if not check_faculty_permission(request.user):
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    assignments = Course_Assignment.objects.filter(faculty=faculty, is_active=True)
+    
+    selected_assignment = None
+    attendance_data = []
+    
+    if request.GET.get('assignment'):
+        selected_assignment = get_object_or_404(Course_Assignment, id=request.GET.get('assignment'))
+        
+        # Get students and their attendance
+        students = Student_Profile.objects.filter(batch_label=selected_assignment.batch_label)
+        
+        for student in students:
+            total = Attendance.objects.filter(student=student, assignment=selected_assignment).count()
+            present = Attendance.objects.filter(
+                student=student, 
+                assignment=selected_assignment,
+                status='PRESENT'
+            ).count()
+            
+            percentage = (present / total * 100) if total > 0 else 0
+            
+            attendance_data.append({
+                'student': student,
+                'total': total,
+                'present': present,
+                'absent': total - present,
+                'percentage': round(percentage, 2)
+            })
+    
+    context = {
+        'assignments': assignments,
+        'selected_assignment': selected_assignment,
+        'attendance_data': attendance_data,
+        'page_title': 'Attendance Report'
+    }
+    return render(request, "staff_template/staff_attendance_report.html", context)
+
+
+# =============================================================================
+# QUESTION PAPER MANAGEMENT
+# =============================================================================
+
+@login_required
+def staff_view_qp_assignments(request):
+    """View question paper assignments for the faculty"""
+    if not check_faculty_permission(request.user):
+        messages.error(request, "Access Denied. Faculty privileges required.")
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    
+    # Get all QP assignments for this faculty
+    assignments = QuestionPaperAssignment.objects.filter(
+        assigned_faculty=faculty
+    ).select_related(
+        'course', 'academic_year', 'semester', 'regulation'
+    ).order_by('-created_at')
+    
+    # Statistics
+    stats = {
+        'total': assignments.count(),
+        'pending': assignments.filter(status__in=['ASSIGNED', 'IN_PROGRESS']).count(),
+        'submitted': assignments.filter(status='SUBMITTED').count(),
+        'approved': assignments.filter(status='APPROVED').count(),
+        'rejected': assignments.filter(status='REJECTED').count(),
+    }
+    
+    context = {
+        'assignments': assignments,
+        'stats': stats,
+        'page_title': 'My Question Paper Assignments'
+    }
+    return render(request, "staff_template/staff_qp_assignments.html", context)
+
+
+@login_required
+def staff_submit_question_paper(request, qp_id):
+    """Submit question paper for a specific assignment"""
+    if not check_faculty_permission(request.user):
+        messages.error(request, "Access Denied. Faculty privileges required.")
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    qp_assignment = get_object_or_404(QuestionPaperAssignment, id=qp_id, assigned_faculty=faculty)
+    
+    # Check if already approved
+    if qp_assignment.status == 'APPROVED':
+        messages.info(request, "This question paper has already been approved.")
+        return redirect('staff_view_qp_assignments')
+    
+    form = QuestionPaperSubmissionForm(request.POST or None, request.FILES or None, instance=qp_assignment)
+    
+    context = {
+        'form': form,
+        'qp_assignment': qp_assignment,
+        'page_title': f'Submit QP - {qp_assignment.course.course_code}'
+    }
+    
+    if request.method == 'POST':
+        if form.is_valid():
+            try:
+                qp = form.save(commit=False)
+                qp.status = 'SUBMITTED'
+                qp.submitted_at = datetime.now()
+                qp.save()
+                
+                # Create notification for HOD
+                hod_users = Account_User.objects.filter(role='HOD', is_active=True)
+                for hod in hod_users:
+                    Notification.objects.create(
+                        recipient=hod,
+                        title='Question Paper Submitted',
+                        message=f'{faculty.user.full_name} has submitted the {qp.get_exam_type_display()} question paper for {qp.course.course_code} - {qp.course.title}',
+                        notification_type='INFO',
+                        link=reverse('review_question_paper', args=[qp.id])
+                    )
+                
+                messages.success(request, "Question paper submitted successfully! Waiting for review.")
+                return redirect('staff_view_qp_assignments')
+            except Exception as e:
+                messages.error(request, f"Error submitting: {str(e)}")
+        else:
+            messages.error(request, "Please correct the errors in the form")
+    
+    return render(request, "staff_template/staff_submit_qp.html", context)
+
+
+@login_required
+def staff_view_qp_details(request, qp_id):
+    """View details of a specific question paper assignment"""
+    if not check_faculty_permission(request.user):
+        messages.error(request, "Access Denied. Faculty privileges required.")
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    qp_assignment = get_object_or_404(QuestionPaperAssignment, id=qp_id, assigned_faculty=faculty)
+    
+    context = {
+        'qp_assignment': qp_assignment,
+        'page_title': f'QP Details - {qp_assignment.course.course_code}'
+    }
+    return render(request, "staff_template/staff_qp_details.html", context)

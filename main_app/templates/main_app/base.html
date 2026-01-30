@@ -29,6 +29,50 @@
     
     <!-- Google Font: Source Sans Pro -->
     <link href="https://fonts.googleapis.com/css?family=Source+Sans+Pro:300,400,400i,700" rel="stylesheet">
+    
+    <!-- Custom checkbox/input styling -->
+    <style>
+        /* Fix checkbox alignment */
+        .form-group input[type="checkbox"] {
+            margin-right: 10px;
+            vertical-align: middle;
+        }
+        .form-group label {
+            vertical-align: middle;
+        }
+        /* Custom checkbox styling */
+        .custom-control {
+            padding-left: 1.75rem;
+        }
+        .custom-control-label::before,
+        .custom-control-label::after {
+            left: -1.75rem;
+        }
+        .custom-control-input {
+            position: absolute;
+            z-index: -1;
+            opacity: 0;
+        }
+        /* Better checkbox for non-custom forms */
+        input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+        }
+        /* Form checkbox wrapper */
+        .checkbox-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .checkbox-wrapper input[type="checkbox"] {
+            flex-shrink: 0;
+        }
+        .checkbox-wrapper label {
+            margin-bottom: 0;
+        }
+    </style>
+    
     {% block custom_css %}
 
     {% endblock custom_css %}

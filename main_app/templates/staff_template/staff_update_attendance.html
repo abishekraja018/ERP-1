@@ -23,17 +23,17 @@
                             <label>Subject</label>
                             <select name="subject" class="form-control" id='subject'>
                                 <option value="">----</option>
-                                {% for subject in subjects  %}
-                                <option value="{{subject.id}}">{{subject.name}}</option>
+                                {% for assignment in assignments  %}
+                                <option value="{{assignment.id}}">{{assignment.course.course_code}} - {{assignment.course.title}} ({{assignment.batch_label}})</option>
                                 {% endfor %}
                             </select>
                         </div>
                         <div class="form-group">
-                            <label>Session</label>
+                            <label>Academic Year</label>
                             <select name="session" class="form-control" id='session'>
                                 <option value="">----</option>
-                                {% for session in sessions  %}
-                                <option value="{{session.id}}">{{session}}</option>
+                                {% for assignment in assignments  %}
+                                <option value="{{assignment.academic_year.id}}">{{assignment.academic_year.year}}</option>
                                 {% endfor %}
                             </select>
                         </div>
@@ -91,7 +91,7 @@
                 url: "{% url 'get_attendance' %}",
                 type: 'POST',
                 data:{
-                    subject:subject,
+                    assignment:subject,
                     session:session
                 }
             
@@ -142,6 +142,7 @@ if (attendance_date.length  == 0){
                 type: 'POST',
                 data: {
                     attendance_date_id:attendance_date,
+                    assignment: $("#subject").val()
                 }
             }).done(function (response) {
                 var json_data = JSON.parse(response)
@@ -186,6 +187,7 @@ if (attendance_date.length  == 0){
                 data: {
                     date: attendance_date,
                     student_ids: student_data,
+                    assignment: $("#subject").val()
                 }
             }).done(function (response) {
                 if (response == 'OK'){

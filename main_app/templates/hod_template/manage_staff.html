@@ -18,35 +18,46 @@
                             <thead class="thead-dark">
                                 <tr>
                                     <th>#</th>
+                                    <th>Staff ID</th>
                                     <th>Full Name</th>
                                     <th>Email</th>
-                                    <th>Gender</th>
-                                    <th>Course</th>
+                                    <th>Designation</th>
+                                    <th>Type</th>
                                     <th>Avatar</th>
                                     <th>Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {% for staff in allStaff %}
+                                {% for faculty in faculty_list %}
                                 <tr>
                                     <td>{{ forloop.counter }}</td>
-                                    <td>{{staff.last_name}}, {{staff.first_name}}</td>
-                                    <td>{{staff.email}}</td>
-                                    <td>{{staff.gender}}</td>
-                                    <td>{{staff.staff.course.name}}</td>
+                                    <td>{{faculty.staff_id}}</td>
+                                    <td>{{faculty.user.full_name}}</td>
+                                    <td>{{faculty.user.email}}</td>
+                                    <td>{{faculty.get_designation_display}}</td>
                                     <td>
-                                        {% if staff.profile_pic == ""  %}
-                                        No Image
+                                        {% if faculty.is_external %}
+                                        <span class="badge badge-warning">Guest</span>
                                         {% else %}
-                                        <img class="img img-fluid mb-2" height="56" width="56"
-                                            src="{{staff.profile_pic}}" alt="">
+                                        <span class="badge badge-success">Regular</span>
                                         {% endif %}
                                     </td>
                                     <td>
-                                        <a href="{% url 'edit_staff' staff.staff.id %}" class="btn btn-info">Edit</a> - 
-                                        <a href="{% url 'delete_staff' staff.staff.id %}" class="btn btn-danger" onclick="return confirm('Are you sure about this ?')">Delete</a>
-                                    
+                                        {% if faculty.user.profile_pic %}
+                                        <img class="img img-fluid mb-2" height="40" width="40"
+                                            src="{{faculty.user.profile_pic.url}}" alt="">
+                                        {% else %}
+                                        <i class="fas fa-user-circle fa-2x"></i>
+                                        {% endif %}
                                     </td>
+                                    <td>
+                                        <a href="{% url 'edit_faculty' faculty.id %}" class="btn btn-info btn-sm">Edit</a>
+                                        <a href="{% url 'delete_faculty' faculty.id %}" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure?')">Delete</a>
+                                    </td>
+                                </tr>
+                                {% empty %}
+                                <tr>
+                                    <td colspan="8" class="text-center">No faculty found. <a href="{% url 'add_faculty' %}">Add one</a></td>
                                 </tr>
                                 {% endfor %}
                             </tbody>

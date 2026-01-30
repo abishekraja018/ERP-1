@@ -23,19 +23,19 @@
                             <label>Subject</label>
                             <select name="subject" class="form-control" id='subject'>
                                 <option value="">----</option>
-                                {% for subject in subjects  %}
-                                <option value="{{subject.id}}">{{subject.name}}</option>
+                                {% for assignment in assignments  %}
+                                <option value="{{assignment.id}}">{{assignment.course.course_code}} - {{assignment.course.title}} ({{assignment.batch_label}})</option>
                                 {% endfor %}
                             </select>
                         </div>
 
 
                         <div class="form-group">
-                            <label>Session Year</label>
+                            <label>Academic Year</label>
                             <select name="session" id='session' class="form-control">
                                 <option value="">----</option>
-                                {% for session in sessions  %}
-                                <option value="{{session.id}}">{{session}} </option>
+                                {% for assignment in assignments  %}
+                                <option value="{{assignment.academic_year.id}}">{{assignment.academic_year.year}} </option>
                                 {% endfor %}
                             </select>
                         </div>
@@ -83,7 +83,7 @@ if (subject.length  == 0 || session.length == 0){
                 url: "{% url 'get_students' %}",
                 type: 'POST',
                 data: {
-                    subject: subject,
+                    assignment: subject,
                     session: session
                 }
             }).done(function (response) {
@@ -128,7 +128,7 @@ if (subject.length  == 0 || session.length == 0){
                     data: {
                         date: attendance_date,
                         student_ids: student_data,
-                        subject: subject,
+                        assignment: subject,
                         session: session
             
                     }

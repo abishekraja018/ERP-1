@@ -1,18 +1,38 @@
+"""
+Anna University CSE Department ERP System
+Database Models for Django with PostgreSQL
+
+Designed for:
+- User & Authentication Management
+- Role-Specific Profiles (Faculty, Student, Non-Teaching Staff)
+- Academic & Attendance Management
+- Research & Achievement Tracking (NIRF/Ranking Data)
+- Lab Support System
+- Leave, Feedback, Events, and Notifications
+"""
+
+import uuid
 from django.contrib.auth.hashers import make_password
-from django.contrib.auth.models import UserManager
+from django.contrib.auth.models import UserManager, AbstractUser
 from django.dispatch import receiver
 from django.db.models.signals import post_save
 from django.db import models
-from django.contrib.auth.models import AbstractUser
-from datetime import datetime,timedelta
+from django.core.validators import MinValueValidator, MaxValueValidator, RegexValidator
+from datetime import datetime, timedelta
 
 
-
+# =============================================================================
+# CUSTOM USER MANAGER
+# =============================================================================
 
 class CustomUserManager(UserManager):
+    """Custom manager for Account_User model using email as the identifier."""
+    
     def _create_user(self, email, password, **extra_fields):
+        if not email:
+            raise ValueError('The Email field must be set')
         email = self.normalize_email(email)
-        user = CustomUser(email=email, **extra_fields)
+        user = self.model(email=email, **extra_fields)
         user.password = make_password(password)
         user.save(using=self._db)
         return user
@@ -25,256 +45,911 @@ class CustomUserManager(UserManager):
     def create_superuser(self, email, password=None, **extra_fields):
         extra_fields.setdefault("is_staff", True)
         extra_fields.setdefault("is_superuser", True)
+        extra_fields.setdefault("role", "HOD")
 
-        assert extra_fields["is_staff"]
-        assert extra_fields["is_superuser"]
+        if extra_fields.get("is_staff") is not True:
+            raise ValueError("Superuser must have is_staff=True.")
+        if extra_fields.get("is_superuser") is not True:
+            raise ValueError("Superuser must have is_superuser=True.")
         return self._create_user(email, password, **extra_fields)
 
 
-class Session(models.Model):
-    start_year = models.DateField()
-    end_year = models.DateField()
+# =============================================================================
+# 1. USER & AUTHENTICATION (CORE)
+# =============================================================================
 
+class Account_User(AbstractUser):
+    """
+    Custom User Model for Anna University CSE ERP.
+    Uses email as the login identifier instead of username.
+    """
+    
+    ROLE_CHOICES = [
+        ('HOD', 'Head of Department'),
+        ('FACULTY', 'Faculty'),
+        ('STAFF', 'Non-Teaching Staff'),
+        ('STUDENT', 'Student'),
+        ('GUEST', 'Guest Faculty'),
+    ]
+    
+    GENDER_CHOICES = [
+        ('M', 'Male'),
+        ('F', 'Female'),
+        ('O', 'Other'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    username = None  # Remove username field
+    email = models.EmailField(unique=True, verbose_name='Email Address')
+    full_name = models.CharField(max_length=200, verbose_name='Full Name')
+    role = models.CharField(max_length=10, choices=ROLE_CHOICES, default='STUDENT')
+    gender = models.CharField(max_length=1, choices=GENDER_CHOICES, blank=True, null=True)
+    phone = models.CharField(max_length=15, blank=True, null=True)
+    profile_pic = models.ImageField(upload_to='profile_pics/', blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    fcm_token = models.TextField(default="", blank=True)  # Firebase notifications
+    date_joined = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    USERNAME_FIELD = 'email'
+    REQUIRED_FIELDS = ['full_name']
+    
+    objects = CustomUserManager()
+    
+    class Meta:
+        verbose_name = 'User'
+        verbose_name_plural = 'Users'
+        ordering = ['-date_joined']
+    
     def __str__(self):
-        return "From " + str(self.start_year) + " to " + str(self.end_year)
+        return f"{self.full_name} ({self.get_role_display()})"
+    
+    @property
+    def first_name_display(self):
+        return self.full_name.split()[0] if self.full_name else ""
+    
+    @property
+    def last_name_display(self):
+        parts = self.full_name.split()
+        return parts[-1] if len(parts) > 1 else ""
 
 
-class CustomUser(AbstractUser):
-    USER_TYPE = ((1, "HOD"), (2, "Staff"), (3, "Student"))
-    GENDER = [("M", "Male"), ("F", "Female")]
+# =============================================================================
+# 2. ACADEMIC STRUCTURE MODELS
+# =============================================================================
+
+class Regulation(models.Model):
+    """Regulation/Curriculum version (e.g., 2017, 2021)"""
     
+    year = models.IntegerField(unique=True, validators=[MinValueValidator(2000), MaxValueValidator(2100)])
+    name = models.CharField(max_length=100, blank=True)  # e.g., "R2021"
+    description = models.TextField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    effective_from = models.DateField(null=True, blank=True)
     
-    username = None  # Removed username, using email instead
-    email = models.EmailField(unique=True)
-    user_type = models.CharField(default=1, choices=USER_TYPE, max_length=1)
-    gender = models.CharField(max_length=1, choices=GENDER)
-    profile_pic = models.ImageField()
-    address = models.TextField()
-    fcm_token = models.TextField(default="")  # For firebase notifications
+    class Meta:
+        ordering = ['-year']
+    
+    def __str__(self):
+        return f"R{self.year}"
+
+
+class AcademicYear(models.Model):
+    """Academic Year Management"""
+    
+    year = models.CharField(max_length=10, unique=True)  # e.g., "2025-26"
+    start_date = models.DateField()
+    end_date = models.DateField()
+    is_current = models.BooleanField(default=False)
+    
+    class Meta:
+        ordering = ['-start_date']
+        verbose_name = 'Academic Year'
+        verbose_name_plural = 'Academic Years'
+    
+    def __str__(self):
+        return self.year
+    
+    def save(self, *args, **kwargs):
+        # Ensure only one academic year is marked as current
+        if self.is_current:
+            AcademicYear.objects.filter(is_current=True).update(is_current=False)
+        super().save(*args, **kwargs)
+
+
+class Semester(models.Model):
+    """Semester Management"""
+    
+    SEMESTER_CHOICES = [(i, f'Semester {i}') for i in range(1, 9)]
+    TYPE_CHOICES = [
+        ('ODD', 'Odd Semester'),
+        ('EVEN', 'Even Semester'),
+    ]
+    
+    academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE, related_name='semesters')
+    semester_number = models.IntegerField(choices=SEMESTER_CHOICES)
+    semester_type = models.CharField(max_length=4, choices=TYPE_CHOICES)
+    start_date = models.DateField()
+    end_date = models.DateField()
+    is_current = models.BooleanField(default=False)
+    
+    class Meta:
+        unique_together = ('academic_year', 'semester_number')
+        ordering = ['-academic_year', 'semester_number']
+    
+    def __str__(self):
+        return f"{self.academic_year} - Sem {self.semester_number}"
+
+
+# =============================================================================
+# 3. ROLE-SPECIFIC PROFILES
+# =============================================================================
+
+class Faculty_Profile(models.Model):
+    """Profile for Faculty members including Guest Faculty"""
+    
+    DESIGNATION_CHOICES = [
+        ('AP', 'Assistant Professor'),
+        ('ASP', 'Associate Professor'),
+        ('PROF', 'Professor'),
+        ('HOD', 'Head of Department'),
+    ]
+    
+    user = models.OneToOneField(Account_User, on_delete=models.CASCADE, related_name='faculty_profile')
+    staff_id = models.CharField(max_length=20, unique=True, verbose_name='Staff ID')
+    designation = models.CharField(max_length=5, choices=DESIGNATION_CHOICES, default='AP')
+    is_external = models.BooleanField(default=False, verbose_name='External/Guest Faculty',
+                                       help_text='Mark True for Naan Mudhalvan/SDC/Guest staff')
+    specialization = models.CharField(max_length=200, blank=True, null=True)
+    qualification = models.CharField(max_length=200, blank=True, null=True)  # e.g., "Ph.D., M.Tech"
+    experience_years = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    date_of_joining = models.DateField(null=True, blank=True)
+    contract_expiry = models.DateField(null=True, blank=True, 
+                                        help_text='For Guest faculty access control')
+    cabin_number = models.CharField(max_length=20, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    USERNAME_FIELD = "email"
-    REQUIRED_FIELDS = []
-    objects = CustomUserManager()
-
+    
+    class Meta:
+        verbose_name = 'Faculty Profile'
+        verbose_name_plural = 'Faculty Profiles'
+    
     def __str__(self):
-        return  self.first_name + " " + self.last_name
+        external = " (Guest)" if self.is_external else ""
+        return f"{self.user.full_name} - {self.get_designation_display()}{external}"
+    
+    @property
+    def is_contract_expired(self):
+        if self.contract_expiry:
+            return self.contract_expiry < datetime.now().date()
+        return False
 
 
-class Admin(models.Model):
-    admin = models.OneToOneField(CustomUser, on_delete=models.CASCADE)
+class NonTeachingStaff_Profile(models.Model):
+    """Profile for Non-Teaching Staff (Lab Assistants, Office Staff)"""
+    
+    STAFF_TYPE_CHOICES = [
+        ('LAB_ASST', 'Lab Assistant'),
+        ('LAB_TECH', 'Lab Technician'),
+        ('OFFICE', 'Office Staff'),
+        ('ADMIN', 'Administrative Staff'),
+        ('OTHER', 'Other'),
+    ]
+    
+    user = models.OneToOneField(Account_User, on_delete=models.CASCADE, related_name='nonteaching_profile')
+    staff_id = models.CharField(max_length=20, unique=True, verbose_name='Staff ID')
+    staff_type = models.CharField(max_length=10, choices=STAFF_TYPE_CHOICES, default='LAB_ASST')
+    department = models.CharField(max_length=100, default='CSE')
+    date_of_joining = models.DateField(null=True, blank=True)
+    assigned_lab = models.CharField(max_length=100, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        verbose_name = 'Non-Teaching Staff Profile'
+        verbose_name_plural = 'Non-Teaching Staff Profiles'
+    
+    def __str__(self):
+        return f"{self.user.full_name} - {self.get_staff_type_display()}"
 
 
+class Student_Profile(models.Model):
+    """Profile for Students"""
+    
+    BATCH_LABEL_CHOICES = [
+        ('N', 'N Section'),
+        ('P', 'P Section'),
+        ('Q', 'Q Section'),
+    ]
+    
+    BRANCH_CHOICES = [
+        ('CSE', 'Computer Science and Engineering'),
+        ('AIML', 'Artificial Intelligence and Machine Learning'),
+        ('CSBS', 'Computer Science and Business Systems'),
+    ]
+    
+    PROGRAM_TYPE_CHOICES = [
+        ('UG', 'Undergraduate'),
+        ('PG', 'Postgraduate'),
+        ('PHD', 'Ph.D.'),
+    ]
+    
+    register_validator = RegexValidator(
+        regex=r'^\d{12}$',
+        message='Register number must be exactly 12 digits'
+    )
+    
+    user = models.OneToOneField(Account_User, on_delete=models.CASCADE, related_name='student_profile')
+    register_no = models.CharField(max_length=12, unique=True, validators=[register_validator],
+                                    verbose_name='Register Number')
+    batch_label = models.CharField(max_length=1, choices=BATCH_LABEL_CHOICES, 
+                                    verbose_name='Classroom Section')
+    branch = models.CharField(max_length=10, choices=BRANCH_CHOICES, default='CSE')
+    program_type = models.CharField(max_length=5, choices=PROGRAM_TYPE_CHOICES, default='UG')
+    regulation = models.ForeignKey(Regulation, on_delete=models.SET_NULL, null=True, blank=True)
+    current_sem = models.IntegerField(default=1, validators=[MinValueValidator(1), MaxValueValidator(8)])
+    admission_year = models.IntegerField(null=True, blank=True)
+    advisor = models.ForeignKey(Faculty_Profile, on_delete=models.SET_NULL, null=True, blank=True,
+                                 related_name='advisees', verbose_name='Faculty Advisor/Counselor')
+    parent_name = models.CharField(max_length=200, blank=True, null=True)
+    parent_phone = models.CharField(max_length=15, blank=True, null=True)
+    blood_group = models.CharField(max_length=5, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        verbose_name = 'Student Profile'
+        verbose_name_plural = 'Student Profiles'
+    
+    def __str__(self):
+        return f"{self.register_no} - {self.user.full_name} ({self.branch})"
+
+
+# =============================================================================
+# 4. ACADEMIC & ATTENDANCE MANAGEMENT
+# =============================================================================
 
 class Course(models.Model):
-    name = models.CharField(max_length=120)
+    """Course/Subject Master Table"""
+    
+    COURSE_TYPE_CHOICES = [
+        ('THEORY', 'Theory'),
+        ('LAB', 'Laboratory'),
+        ('PROJECT', 'Project'),
+        ('SEMINAR', 'Seminar'),
+    ]
+    
+    course_code = models.CharField(max_length=10, primary_key=True)  # e.g., "CS3401"
+    title = models.CharField(max_length=200)
+    regulation = models.ForeignKey(Regulation, on_delete=models.CASCADE, related_name='courses')
+    course_type = models.CharField(max_length=10, choices=COURSE_TYPE_CHOICES, default='THEORY')
+    is_lab = models.BooleanField(default=False)
+    credits = models.IntegerField(default=3, validators=[MinValueValidator(0), MaxValueValidator(10)])
+    lecture_hours = models.IntegerField(default=3, validators=[MinValueValidator(0)])
+    tutorial_hours = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    practical_hours = models.IntegerField(default=0, validators=[MinValueValidator(0)])
+    semester = models.IntegerField(default=1, validators=[MinValueValidator(1), MaxValueValidator(8)])
+    branch = models.CharField(max_length=10, choices=Student_Profile.BRANCH_CHOICES, default='CSE')
+    syllabus_file = models.FileField(upload_to='syllabus/', blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
+    
+    class Meta:
+        ordering = ['semester', 'course_code']
+    
     def __str__(self):
-        return self.name
-
-class Book(models.Model):
-    name = models.CharField(max_length=200)
-    author = models.CharField(max_length=200)
-    isbn = models.PositiveIntegerField()
-    category = models.CharField(max_length=50)
-
-    def __str__(self):
-        return str(self.name) + " ["+str(self.isbn)+']'
+        return f"{self.course_code} - {self.title}"
 
 
-class Student(models.Model):
-    admin = models.OneToOneField(CustomUser, on_delete=models.CASCADE)
-    course = models.ForeignKey(Course, on_delete=models.DO_NOTHING, null=True, blank=False)
-    session = models.ForeignKey(Session, on_delete=models.DO_NOTHING, null=True)
-
-    def __str__(self):
-        return self.admin.last_name + ", " + self.admin.first_name
-
-class Library(models.Model):
-    student = models.ForeignKey(Student,  on_delete=models.CASCADE, null=True, blank=False)
-    book = models.ForeignKey(Book,  on_delete=models.CASCADE, null=True, blank=False)
-    def __str__(self):
-        return str(self.student)
-
-def expiry():
-    return datetime.today() + timedelta(days=14)
-class IssuedBook(models.Model):
-    student_id = models.CharField(max_length=100, blank=True) 
-    isbn = models.CharField(max_length=13)
-    issued_date = models.DateField(auto_now=True)
-    expiry_date = models.DateField(default=expiry)
-
-
-
-class Staff(models.Model):
-    course = models.ForeignKey(Course, on_delete=models.DO_NOTHING, null=True, blank=False)
-    admin = models.OneToOneField(CustomUser, on_delete=models.CASCADE)
-
-    def __str__(self):
-        return self.admin.first_name + " " +  self.admin.last_name
-
-
-class Subject(models.Model):
-    name = models.CharField(max_length=120)
-    staff = models.ForeignKey(Staff,on_delete=models.CASCADE,)
-    course = models.ForeignKey(Course, on_delete=models.CASCADE)
-    updated_at = models.DateTimeField(auto_now=True)
+class Course_Assignment(models.Model):
+    """
+    Links Course to Faculty for a specific batch and semester.
+    This is the key table for academic operations.
+    """
+    
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='assignments')
+    faculty = models.ForeignKey(Faculty_Profile, on_delete=models.CASCADE, related_name='course_assignments')
+    batch_label = models.CharField(max_length=1, choices=Student_Profile.BATCH_LABEL_CHOICES)
+    academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE)
+    semester = models.ForeignKey(Semester, on_delete=models.CASCADE)
+    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
-
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ('course', 'batch_label', 'academic_year', 'semester')
+        verbose_name = 'Course Assignment'
+        verbose_name_plural = 'Course Assignments'
+        ordering = ['-academic_year', 'course']
+    
     def __str__(self):
-        return self.name
+        return f"{self.course.course_code} - {self.faculty.user.full_name} ({self.batch_label})"
 
 
 class Attendance(models.Model):
-    session = models.ForeignKey(Session, on_delete=models.DO_NOTHING)
-    subject = models.ForeignKey(Subject, on_delete=models.DO_NOTHING)
+    """Individual Attendance Record"""
+    
+    STATUS_CHOICES = [
+        ('PRESENT', 'Present'),
+        ('ABSENT', 'Absent'),
+        ('OD', 'On Duty'),
+        ('LEAVE', 'On Leave'),
+    ]
+    
+    student = models.ForeignKey(Student_Profile, on_delete=models.CASCADE, related_name='attendances')
+    assignment = models.ForeignKey(Course_Assignment, on_delete=models.CASCADE, related_name='attendances')
     date = models.DateField()
+    period = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(8)])
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='PRESENT')
+    marked_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, 
+                                   related_name='marked_attendances')
+    remarks = models.CharField(max_length=200, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ('student', 'assignment', 'date', 'period')
+        ordering = ['-date', 'period']
+    
+    def __str__(self):
+        return f"{self.student.register_no} - {self.assignment.course.course_code} - {self.date} - P{self.period}"
 
 
-class AttendanceReport(models.Model):
-    student = models.ForeignKey(Student, on_delete=models.DO_NOTHING)
-    attendance = models.ForeignKey(Attendance, on_delete=models.CASCADE)
-    status = models.BooleanField(default=False)
+# =============================================================================
+# 5. RESEARCH & ACHIEVEMENT (NIRF/RANKING DATA)
+# =============================================================================
+
+class Publication(models.Model):
+    """Faculty Publication Records for NIRF and Rankings"""
+    
+    PUB_TYPE_CHOICES = [
+        ('JOURNAL', 'Journal Article'),
+        ('CONFERENCE', 'Conference Paper'),
+        ('PATENT', 'Patent'),
+        ('BOOK', 'Book'),
+        ('CHAPTER', 'Book Chapter'),
+    ]
+    
+    INDEXING_CHOICES = [
+        ('SCOPUS', 'Scopus'),
+        ('WOS', 'Web of Science'),
+        ('UGC_CARE', 'UGC CARE'),
+        ('SCI', 'SCI'),
+        ('SCIE', 'SCIE'),
+        ('OTHER', 'Other'),
+    ]
+    
+    faculty = models.ForeignKey(Faculty_Profile, on_delete=models.CASCADE, related_name='publications')
+    title = models.CharField(max_length=500)
+    journal_name = models.CharField(max_length=300)
+    pub_type = models.CharField(max_length=15, choices=PUB_TYPE_CHOICES, default='JOURNAL')
+    doi = models.CharField(max_length=200, unique=True, blank=True, null=True, verbose_name='DOI')
+    indexing = models.CharField(max_length=15, choices=INDEXING_CHOICES, default='OTHER')
+    year = models.IntegerField(validators=[MinValueValidator(1990), MaxValueValidator(2100)])
+    month = models.IntegerField(blank=True, null=True, validators=[MinValueValidator(1), MaxValueValidator(12)])
+    authors = models.TextField(help_text='Comma-separated list of all authors')
+    impact_factor = models.DecimalField(max_digits=5, decimal_places=3, blank=True, null=True)
+    citation_count = models.IntegerField(default=0)
+    proof_file = models.FileField(upload_to='publications/', blank=True, null=True)
+    is_verified = models.BooleanField(default=False, help_text='Verified by HOD')
+    verified_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, blank=True,
+                                     related_name='verified_publications')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-year', '-month']
+    
+    def __str__(self):
+        return f"{self.title[:50]}... ({self.year})"
 
 
-class LeaveReportStudent(models.Model):
-    student = models.ForeignKey(Student, on_delete=models.CASCADE)
-    date = models.CharField(max_length=60)
+class Student_Achievement(models.Model):
+    """Student Achievement Records"""
+    
+    AWARD_CATEGORY_CHOICES = [
+        ('GOLD', 'Gold'),
+        ('SILVER', 'Silver'),
+        ('BRONZE', 'Bronze'),
+        ('WINNER', 'Winner'),
+        ('RUNNER_UP', 'Runner Up'),
+        ('PARTICIPATION', 'Participation'),
+        ('MERIT', 'Merit'),
+    ]
+    
+    EVENT_TYPE_CHOICES = [
+        ('HACKATHON', 'Hackathon'),
+        ('CODING', 'Coding Competition'),
+        ('PAPER', 'Paper Presentation'),
+        ('PROJECT', 'Project Competition'),
+        ('SPORTS', 'Sports'),
+        ('CULTURAL', 'Cultural'),
+        ('WORKSHOP', 'Workshop'),
+        ('INTERNSHIP', 'Internship'),
+        ('PLACEMENT', 'Placement'),
+        ('OTHER', 'Other'),
+    ]
+    
+    student = models.ForeignKey(Student_Profile, on_delete=models.CASCADE, related_name='achievements')
+    event_name = models.CharField(max_length=300)
+    event_type = models.CharField(max_length=15, choices=EVENT_TYPE_CHOICES, default='OTHER')
+    award_category = models.CharField(max_length=15, choices=AWARD_CATEGORY_CHOICES)
+    organizing_body = models.CharField(max_length=200, blank=True, null=True)
+    event_date = models.DateField()
+    description = models.TextField(blank=True, null=True)
+    proof_file = models.FileField(upload_to='achievements/', blank=True, null=True)
+    is_verified = models.BooleanField(default=False)
+    verified_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-event_date']
+        verbose_name = 'Student Achievement'
+        verbose_name_plural = 'Student Achievements'
+    
+    def __str__(self):
+        return f"{self.student.register_no} - {self.event_name} ({self.get_award_category_display()})"
+
+
+# =============================================================================
+# 6. LAB SUPPORT SYSTEM
+# =============================================================================
+
+class Lab_Issue_Log(models.Model):
+    """Lab Equipment Issue Tracking"""
+    
+    LAB_CHOICES = [
+        ('CASE_TOOLS', 'CASE Tools Lab'),
+        ('PROGRAMMING', 'Programming Lab'),
+        ('NETWORKS', 'Networks Lab'),
+        ('DBMS', 'DBMS Lab'),
+        ('OS', 'Operating Systems Lab'),
+        ('WEB', 'Web Technology Lab'),
+        ('AI_ML', 'AI/ML Lab'),
+        ('IOT', 'IoT Lab'),
+        ('PROJECT', 'Project Lab'),
+        ('RESEARCH', 'Research Lab'),
+    ]
+    
+    ISSUE_CATEGORY_CHOICES = [
+        ('MONITOR', 'Monitor Issue'),
+        ('KEYBOARD', 'Keyboard Issue'),
+        ('MOUSE', 'Mouse Issue'),
+        ('CPU', 'CPU/System Issue'),
+        ('SOFTWARE', 'Software Issue'),
+        ('NETWORK', 'Network Issue'),
+        ('PRINTER', 'Printer Issue'),
+        ('PROJECTOR', 'Projector Issue'),
+        ('AC', 'AC Issue'),
+        ('FURNITURE', 'Furniture Issue'),
+        ('OTHER', 'Other'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('IN_PROGRESS', 'In Progress'),
+        ('RESOLVED', 'Resolved'),
+        ('ESCALATED', 'Escalated'),
+        ('CLOSED', 'Closed'),
+    ]
+    
+    PRIORITY_CHOICES = [
+        ('LOW', 'Low'),
+        ('MEDIUM', 'Medium'),
+        ('HIGH', 'High'),
+        ('CRITICAL', 'Critical'),
+    ]
+    
+    lab_name = models.CharField(max_length=20, choices=LAB_CHOICES)
+    place_code = models.CharField(max_length=10, help_text='Physical desk/system location (e.g., D23)')
+    reported_by = models.ForeignKey(Account_User, on_delete=models.CASCADE, related_name='reported_issues')
+    issue_category = models.CharField(max_length=15, choices=ISSUE_CATEGORY_CHOICES)
+    priority = models.CharField(max_length=10, choices=PRIORITY_CHOICES, default='MEDIUM')
+    description = models.TextField()
+    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='PENDING')
+    assigned_to = models.ForeignKey(NonTeachingStaff_Profile, on_delete=models.SET_NULL, 
+                                     null=True, blank=True, related_name='assigned_issues')
+    resolution_notes = models.TextField(blank=True, null=True)
+    reported_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-reported_at']
+        verbose_name = 'Lab Issue Log'
+        verbose_name_plural = 'Lab Issue Logs'
+    
+    def __str__(self):
+        return f"{self.get_lab_name_display()} - {self.place_code} - {self.get_issue_category_display()}"
+
+
+# =============================================================================
+# 7. LEAVE MANAGEMENT
+# =============================================================================
+
+class LeaveRequest(models.Model):
+    """Unified Leave Request for all user types"""
+    
+    LEAVE_TYPE_CHOICES = [
+        ('CASUAL', 'Casual Leave'),
+        ('MEDICAL', 'Medical Leave'),
+        ('OD', 'On Duty'),
+        ('VACATION', 'Vacation'),
+        ('MATERNITY', 'Maternity Leave'),
+        ('PATERNITY', 'Paternity Leave'),
+        ('EMERGENCY', 'Emergency Leave'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('APPROVED', 'Approved'),
+        ('REJECTED', 'Rejected'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    
+    user = models.ForeignKey(Account_User, on_delete=models.CASCADE, related_name='leave_requests')
+    leave_type = models.CharField(max_length=15, choices=LEAVE_TYPE_CHOICES, default='CASUAL')
+    start_date = models.DateField()
+    end_date = models.DateField()
+    reason = models.TextField()
+    supporting_document = models.FileField(upload_to='leave_documents/', blank=True, null=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='PENDING')
+    approved_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, blank=True,
+                                     related_name='approved_leaves')
+    admin_remarks = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"{self.user.full_name} - {self.get_leave_type_display()} ({self.start_date} to {self.end_date})"
+    
+    @property
+    def duration_days(self):
+        return (self.end_date - self.start_date).days + 1
+
+
+# =============================================================================
+# 8. FEEDBACK SYSTEM
+# =============================================================================
+
+class Feedback(models.Model):
+    """Unified Feedback System"""
+    
+    FEEDBACK_TYPE_CHOICES = [
+        ('GENERAL', 'General Feedback'),
+        ('COURSE', 'Course Feedback'),
+        ('INFRASTRUCTURE', 'Infrastructure'),
+        ('FACULTY', 'Faculty Feedback'),
+        ('SUGGESTION', 'Suggestion'),
+        ('COMPLAINT', 'Complaint'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('REVIEWED', 'Reviewed'),
+        ('RESOLVED', 'Resolved'),
+    ]
+    
+    user = models.ForeignKey(Account_User, on_delete=models.CASCADE, related_name='feedbacks')
+    feedback_type = models.CharField(max_length=20, choices=FEEDBACK_TYPE_CHOICES, default='GENERAL')
+    subject = models.CharField(max_length=200)
     message = models.TextField()
-    status = models.SmallIntegerField(default=0)
+    related_course = models.ForeignKey(Course, on_delete=models.SET_NULL, null=True, blank=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='PENDING')
+    reply = models.TextField(blank=True, null=True)
+    replied_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, blank=True,
+                                    related_name='feedback_replies')
+    is_anonymous = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Feedback'
+        verbose_name_plural = 'Feedbacks'
+    
+    def __str__(self):
+        return f"{self.get_feedback_type_display()} - {self.subject[:50]}"
 
 
-class LeaveReportStaff(models.Model):
-    staff = models.ForeignKey(Staff, on_delete=models.CASCADE)
-    date = models.CharField(max_length=60)
-    message = models.TextField()
-    status = models.SmallIntegerField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-
-class FeedbackStudent(models.Model):
-    student = models.ForeignKey(Student, on_delete=models.CASCADE)
-    feedback = models.TextField()
-    reply = models.TextField()
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-
-class FeedbackStaff(models.Model):
-    staff = models.ForeignKey(Staff, on_delete=models.CASCADE)
-    feedback = models.TextField()
-    reply = models.TextField()
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-
-class NotificationStaff(models.Model):
-    staff = models.ForeignKey(Staff, on_delete=models.CASCADE)
-    message = models.TextField()
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-
-class NotificationStudent(models.Model):
-    student = models.ForeignKey(Student, on_delete=models.CASCADE)
-    message = models.TextField()
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-
-class StudentResult(models.Model):
-    student = models.ForeignKey(Student, on_delete=models.CASCADE)
-    subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
-    test = models.FloatField(default=0)
-    exam = models.FloatField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
+# =============================================================================
+# 9. EVENTS MANAGEMENT
+# =============================================================================
 
 class Event(models.Model):
-    title = models.CharField(max_length=200)
+    """Department Events and Activities"""
+    
+    EVENT_TYPE_CHOICES = [
+        ('WORKSHOP', 'Workshop'),
+        ('SEMINAR', 'Seminar'),
+        ('WEBINAR', 'Webinar'),
+        ('HACKATHON', 'Hackathon'),
+        ('CULTURAL', 'Cultural Event'),
+        ('SPORTS', 'Sports Event'),
+        ('PLACEMENT', 'Placement Drive'),
+        ('GUEST_LECTURE', 'Guest Lecture'),
+        ('FDP', 'Faculty Development Program'),
+        ('CONFERENCE', 'Conference'),
+        ('OTHER', 'Other'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('UPCOMING', 'Upcoming'),
+        ('ONGOING', 'Ongoing'),
+        ('COMPLETED', 'Completed'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    
+    title = models.CharField(max_length=300)
+    event_type = models.CharField(max_length=15, choices=EVENT_TYPE_CHOICES, default='OTHER')
     description = models.TextField()
-    date = models.DateTimeField()
-    location = models.CharField(max_length=300)
+    start_datetime = models.DateTimeField()
+    end_datetime = models.DateTimeField()
+    venue = models.CharField(max_length=300)
+    is_online = models.BooleanField(default=False)
+    online_link = models.URLField(blank=True, null=True)
+    max_participants = models.IntegerField(default=0, help_text='0 for unlimited')
+    registration_deadline = models.DateTimeField(null=True, blank=True)
+    coordinator = models.ForeignKey(Faculty_Profile, on_delete=models.SET_NULL, null=True, 
+                                     related_name='coordinated_events')
+    poster = models.ImageField(upload_to='event_posters/', blank=True, null=True)
+    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='UPCOMING')
+    is_department_only = models.BooleanField(default=False, help_text='Only for CSE department')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
-    def __str__(self):
-        return self.title
-
+    
     class Meta:
-        ordering = ['-date']
+        ordering = ['-start_datetime']
+    
+    def __str__(self):
+        return f"{self.title} ({self.start_datetime.strftime('%d %b %Y')})"
+    
+    @property
+    def registration_count(self):
+        return self.registrations.count()
+    
+    @property
+    def is_registration_open(self):
+        if self.registration_deadline:
+            return datetime.now() < self.registration_deadline
+        return self.status == 'UPCOMING'
 
 
 class EventRegistration(models.Model):
-    student = models.ForeignKey(Student, on_delete=models.CASCADE)
-    event = models.ForeignKey(Event, on_delete=models.CASCADE)
-    registered_at = models.DateTimeField(auto_now_add=True)
+    """Event Registration Records"""
+    
+    ATTENDANCE_STATUS = [
+        ('REGISTERED', 'Registered'),
+        ('ATTENDED', 'Attended'),
+        ('NO_SHOW', 'No Show'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='registrations')
+    user = models.ForeignKey(Account_User, on_delete=models.CASCADE, related_name='event_registrations')
+    attendance_status = models.CharField(max_length=15, choices=ATTENDANCE_STATUS, default='REGISTERED')
+    registration_time = models.DateTimeField(auto_now_add=True)
+    check_in_time = models.DateTimeField(null=True, blank=True)
+    certificate_issued = models.BooleanField(default=False)
     
     class Meta:
-        unique_together = ('student', 'event')
-        ordering = ['-registered_at']
+        unique_together = ('event', 'user')
+        ordering = ['-registration_time']
     
     def __str__(self):
-        return f"{self.student.admin.first_name} - {self.event.title}"
+        return f"{self.user.full_name} - {self.event.title}"
 
 
-class CourseAllocation(models.Model):
-    subject = models.ForeignKey(Subject, on_delete=models.CASCADE)
-    course = models.ForeignKey(Course, on_delete=models.CASCADE)
-    session = models.ForeignKey(Session, on_delete=models.CASCADE)
-    staff = models.ForeignKey(Staff, on_delete=models.CASCADE)
+# =============================================================================
+# 10. NOTIFICATIONS
+# =============================================================================
+
+class Notification(models.Model):
+    """Unified Notification System"""
+    
+    NOTIFICATION_TYPE_CHOICES = [
+        ('INFO', 'Information'),
+        ('WARNING', 'Warning'),
+        ('URGENT', 'Urgent'),
+        ('REMINDER', 'Reminder'),
+        ('ANNOUNCEMENT', 'Announcement'),
+    ]
+    
+    recipient = models.ForeignKey(Account_User, on_delete=models.CASCADE, related_name='notifications')
+    sender = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, blank=True,
+                                related_name='sent_notifications')
+    notification_type = models.CharField(max_length=15, choices=NOTIFICATION_TYPE_CHOICES, default='INFO')
+    title = models.CharField(max_length=200)
+    message = models.TextField()
+    is_read = models.BooleanField(default=False)
+    read_at = models.DateTimeField(null=True, blank=True)
+    link = models.CharField(max_length=500, blank=True, null=True)  # Optional link to related content
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"{self.title} - {self.recipient.full_name}"
+
+
+# =============================================================================
+# 11. ANNOUNCEMENT SYSTEM
+# =============================================================================
+
+class Announcement(models.Model):
+    """Department-wide Announcements"""
+    
+    AUDIENCE_CHOICES = [
+        ('ALL', 'All Users'),
+        ('FACULTY', 'Faculty Only'),
+        ('STUDENTS', 'Students Only'),
+        ('STAFF', 'Staff Only'),
+    ]
+    
+    PRIORITY_CHOICES = [
+        ('LOW', 'Low'),
+        ('NORMAL', 'Normal'),
+        ('HIGH', 'High'),
+        ('URGENT', 'Urgent'),
+    ]
+    
+    title = models.CharField(max_length=300)
+    content = models.TextField()
+    audience = models.CharField(max_length=10, choices=AUDIENCE_CHOICES, default='ALL')
+    priority = models.CharField(max_length=10, choices=PRIORITY_CHOICES, default='NORMAL')
+    posted_by = models.ForeignKey(Account_User, on_delete=models.CASCADE, related_name='announcements')
+    attachment = models.FileField(upload_to='announcements/', blank=True, null=True)
+    is_pinned = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+    expiry_date = models.DateField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
+    
     class Meta:
-        unique_together = ('subject', 'course', 'session', 'staff')
-        ordering = ['-created_at']
-
+        ordering = ['-is_pinned', '-created_at']
+    
     def __str__(self):
-        return f"{self.subject.name} - {self.course.name} - {self.session} - {self.staff.admin.first_name}"
+        return self.title
 
 
-class CourseAllocationStudent(models.Model):
-    allocation = models.ForeignKey(CourseAllocation, on_delete=models.CASCADE, related_name='students')
-    student = models.ForeignKey(Student, on_delete=models.CASCADE)
+# =============================================================================
+# 11. QUESTION PAPER MANAGEMENT
+# =============================================================================
+
+class QuestionPaperAssignment(models.Model):
+    """Question Paper Setting Assignment by HOD to Faculty"""
+    
+    EXAM_TYPE_CHOICES = [
+        ('CAT1', 'CAT 1'),
+        ('CAT2', 'CAT 2'),
+        ('ENDSEM', 'End Semester'),
+        ('REEXAM', 'Re-Examination'),
+        ('ARREAR', 'Arrear Exam'),
+        ('MODEL', 'Model Exam'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('ASSIGNED', 'Assigned'),
+        ('IN_PROGRESS', 'In Progress'),
+        ('SUBMITTED', 'Submitted'),
+        ('UNDER_REVIEW', 'Under Review'),
+        ('APPROVED', 'Approved'),
+        ('REJECTED', 'Rejected'),
+        ('REVISION_REQUIRED', 'Revision Required'),
+    ]
+    
+    # Assignment details
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='qp_assignments')
+    assigned_faculty = models.ForeignKey(Faculty_Profile, on_delete=models.CASCADE, 
+                                          related_name='qp_assignments')
+    academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE)
+    semester = models.ForeignKey(Semester, on_delete=models.CASCADE)
+    exam_type = models.CharField(max_length=10, choices=EXAM_TYPE_CHOICES)
+    regulation = models.ForeignKey(Regulation, on_delete=models.CASCADE, null=True, blank=True)
+    
+    # Timeline
+    assigned_date = models.DateField(auto_now_add=True)
+    deadline = models.DateField()
+    
+    # Instructions and guidelines
+    max_marks = models.IntegerField(default=100)
+    duration_hours = models.DecimalField(max_digits=3, decimal_places=1, default=3.0)
+    instructions = models.TextField(blank=True, null=True, 
+                                     help_text='Special instructions for question paper preparation')
+    syllabus_units = models.CharField(max_length=50, blank=True, null=True,
+                                       help_text='Units to cover, e.g., "1,2,3,4,5" or "All"')
+    
+    # Question paper submission
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='ASSIGNED')
+    question_paper = models.FileField(upload_to='question_papers/', blank=True, null=True)
+    answer_key = models.FileField(upload_to='answer_keys/', blank=True, null=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    faculty_remarks = models.TextField(blank=True, null=True)
+    
+    # Review details
+    reviewed_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, blank=True,
+                                     related_name='reviewed_qp_assignments')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_comments = models.TextField(blank=True, null=True)
+    
+    # Metadata
+    assigned_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True,
+                                     related_name='assigned_qp_tasks')
     created_at = models.DateTimeField(auto_now_add=True)
-
+    updated_at = models.DateTimeField(auto_now=True)
+    
     class Meta:
-        unique_together = ('allocation', 'student')
-        ordering = ['student']
-
+        ordering = ['-created_at']
+        verbose_name = 'Question Paper Assignment'
+        verbose_name_plural = 'Question Paper Assignments'
+        unique_together = ('course', 'academic_year', 'semester', 'exam_type', 'regulation')
+    
     def __str__(self):
-        return f"{self.student.admin.first_name} - {self.allocation.subject.name}"
+        return f"{self.course.course_code} - {self.get_exam_type_display()} ({self.academic_year})"
+    
+    @property
+    def is_overdue(self):
+        from django.utils import timezone
+        return self.deadline < timezone.now().date() and self.status not in ['SUBMITTED', 'APPROVED']
+    
+    @property
+    def days_remaining(self):
+        from django.utils import timezone
+        delta = self.deadline - timezone.now().date()
+        return delta.days
 
 
-@receiver(post_save, sender=CustomUser)
+# =============================================================================
+# SIGNALS FOR AUTO PROFILE CREATION
+# =============================================================================
+
+@receiver(post_save, sender=Account_User)
 def create_user_profile(sender, instance, created, **kwargs):
+    """Automatically create role-specific profile when user is created"""
     if created:
-        if instance.user_type == 1:
-            Admin.objects.create(admin=instance)
-        if instance.user_type == 2:
-            Staff.objects.create(admin=instance)
-        if instance.user_type == 3:
-            Student.objects.create(admin=instance)
+        if instance.role in ['FACULTY', 'HOD', 'GUEST']:
+            Faculty_Profile.objects.get_or_create(
+                user=instance,
+                defaults={
+                    'staff_id': f'TEMP_{instance.id.hex[:8].upper()}',
+                    'is_external': (instance.role == 'GUEST'),
+                    'designation': 'HOD' if instance.role == 'HOD' else 'AP'
+                }
+            )
+        elif instance.role == 'STAFF':
+            NonTeachingStaff_Profile.objects.get_or_create(
+                user=instance,
+                defaults={'staff_id': f'TEMP_{instance.id.hex[:8].upper()}'}
+            )
+        elif instance.role == 'STUDENT':
+            Student_Profile.objects.get_or_create(
+                user=instance,
+                defaults={
+                    'register_no': f'000000000000',  # Placeholder - must be updated
+                    'batch_label': 'N'
+                }
+            )
 
 
-@receiver(post_save, sender=CustomUser)
-def save_user_profile(sender, instance, **kwargs):
-    if instance.user_type == 1:
-        instance.admin.save()
-    if instance.user_type == 2:
-        instance.staff.save()
-    if instance.user_type == 3:
-        instance.student.save()
+# =============================================================================
+# HELPER FUNCTION FOR ATTENDANCE PERCENTAGE
+# =============================================================================
 
-# todos
+def get_student_attendance_percentage(student_profile, course_assignment=None):
+    """Calculate attendance percentage for a student"""
+    attendances = Attendance.objects.filter(student=student_profile)
+    if course_assignment:
+        attendances = attendances.filter(assignment=course_assignment)
+    
+    total = attendances.count()
+    if total == 0:
+        return 0.0
+    
+    present = attendances.filter(status__in=['PRESENT', 'OD']).count()
+    return round((present / total) * 100, 2)

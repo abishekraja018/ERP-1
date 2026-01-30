@@ -55,9 +55,9 @@
                 <!-- small box -->
                 <div class="small-box bg-primary">
                     <div class="inner">
-                        <h3>{{total_subject}}</h3>
+                        <h3>{{total_courses}}</h3>
 
-                        <p>Total Subject</p>
+                        <p>Total Courses</p>
                     </div>
                     <div class="icon">
                       <i class="nav-icon fas fa-book"></i>
@@ -115,15 +115,49 @@
                         </section>
 
 <!-- Announcements Section -->
-{% if announcements %}
+{% if announcements or dept_announcements %}
 <section class="content">
     <div class="container-fluid">
         <div class="row">
-            <div class="col-md-12">
+            <!-- Department Announcements -->
+            {% if dept_announcements %}
+            <div class="col-md-6">
+                <div class="card card-primary">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <i class="fas fa-bullhorn"></i> Department Announcements
+                        </h3>
+                        <div class="card-tools">
+                            <button type="button" class="btn btn-tool" data-card-widget="collapse"><i class="fas fa-minus"></i></button>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div style="max-height: 400px; overflow-y: auto;">
+                            {% for announcement in dept_announcements %}
+                            <div class="callout callout-info">
+                                <h5><i class="fas fa-info"></i> {{ announcement.title }}</h5>
+                                <p>{{ announcement.content|truncatewords:50 }}</p>
+                                <small class="text-muted">
+                                    <i class="fas fa-calendar"></i> {{ announcement.created_at|date:"d M Y, h:i A" }}
+                                    {% if announcement.created_by %}
+                                        | By: {{ announcement.created_by.full_name }}
+                                    {% endif %}
+                                </small>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+            
+            <!-- External Announcements (Anna University) -->
+            {% if announcements %}
+            <div class="col-md-{% if dept_announcements %}6{% else %}12{% endif %}">
                 <div class="card card-info">
                     <div class="card-header">
                         <h3 class="card-title">
-                            <i class="fas fa-bullhorn"></i> Latest Announcements
+                            <i class="fas fa-university"></i> University Updates
                         </h3>
                         <div class="card-tools">
                             <button type="button" class="btn btn-tool" data-card-widget="collapse"><i class="fas fa-minus"></i></button>
@@ -157,6 +191,7 @@
                     </div>
                 </div>
             </div>
+            {% endif %}
         </div>
     </div>
 </section>

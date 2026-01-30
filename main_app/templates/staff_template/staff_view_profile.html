@@ -14,7 +14,45 @@
                         <h3 class="card-title">{{page_title}}</h3>
                     </div>
 
-                    {% include "main_app/form_template.html" with messages=messages  form=form button_text="Update Profile"%}
+                    <form role="form" method="POST" enctype="multipart/form-data">
+                        {% csrf_token %}
+                        <div class="card-body">
+                            {% if messages %}
+                                {% for message in messages %}
+                                    <div class="alert alert-{% if message.tags %}{{ message.tags }}{% else %}info{% endif %} alert-dismissible fade show" role="alert">
+                                        {{ message }}
+                                        <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                                            <span aria-hidden="true">&times;</span>
+                                        </button>
+                                    </div>
+                                {% endfor %}
+                            {% endif %}
+
+                            <h5 class="text-primary mb-3">Account Information</h5>
+                            {% for field in user_form %}
+                            <div class="form-group">
+                                {{field.errors}}
+                                {{field.label_tag}}
+                                {{field}}
+                            </div>
+                            {% endfor %}
+
+                            <hr>
+                            <h5 class="text-primary mb-3">Faculty Profile</h5>
+                            {% for field in profile_form %}
+                            <div class="form-group">
+                                {{field.errors}}
+                                {{field.label_tag}}
+                                {{field}}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <!-- /.card-body -->
+
+                        <div class="card-footer">
+                            <button type="submit" class="btn btn-success btn-block">Update Profile</button>
+                        </div>
+                    </form>
                 </div>
                 <!-- /.card -->
 

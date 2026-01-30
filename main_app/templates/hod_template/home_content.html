@@ -56,14 +56,14 @@
                 <!-- small box -->
                 <div class="small-box bg-danger">
                     <div class="inner">
-                        <h3>{{total_subject}}</h3>
+                        <h3>{{total_assignments}}</h3>
 
-                        <p>Total Subjects</p>
+                        <p>Course Assignments</p>
                     </div>
                     <div class="icon">
                       <i class="nav-icon fas fa-book"></i>
                     </div>
-                    <a href="{% url 'manage_subject' %}" class="small-box-footer">More info <i class="fas fa-arrow-circle-right"></i></a>
+                    <a href="{% url 'manage_course_assignment' %}" class="small-box-footer">More info <i class="fas fa-arrow-circle-right"></i></a>
                 </div>
             </div>
             <!-- ./col -->
@@ -167,7 +167,7 @@
             <!-- PIE CHART -->
             <div class="card card-dark">
               <div class="card-header">
-                <h3 class="card-title">Total Students in Each Subject</h3>
+                <h3 class="card-title">Course Assignment Distribution</h3>
 
                 <div class="card-tools">
                   <button type="button" class="btn btn-tool" data-card-widget="collapse"><i class="fas fa-minus"></i>
@@ -261,14 +261,14 @@
           options: pieOptions      
         });
 
-        var subject_list = {{ subject_list|safe|escape }};
+        var course_list = {{ course_list|safe|escape }};
         var attendance_list = {{ attendance_list }};
   
             var barChartData = {
-      labels  : subject_list,
+      labels  : course_list,
       datasets: [
       {
-        label               : 'Attendance Per Subject',
+        label               : 'Attendance Per Course',
         backgroundColor     : '#17A2B8',
         borderColor         : 'rgba(60,141,188,0.8)',
         pointRadius          : false,
@@ -307,14 +307,14 @@
         })
        
 
-      // Total Students in Each Subject
-      var student_count_list_in_subject = {{ student_count_list_in_subject }}
-      var subject_list = {{ subject_list|safe }}
+      // Course Assignment Distribution
+      var assignment_count_list = {{ assignment_count_list|default:"[]" }}
+      var course_list_chart = {{ course_list|safe|default:"[]" }}
       var pieData3 = {
-        labels: subject_list,
+        labels: course_list_chart,
         datasets: [
           {
-            data: student_count_list_in_subject,
+            data: assignment_count_list,
             backgroundColor : ['#8f251f', '#00a65a', '#f39c12', '#00c0ef', '#3c8dbc', '#894e9c', '#0b523a', '#a1156d', '#9e4603'],
           }
         ]

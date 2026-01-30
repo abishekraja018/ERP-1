@@ -47,8 +47,8 @@
                             <label>Select Subject</label>
                             <select  id="subject" class="form-control">
                                 <option value="">----</option>
-                                {% for subject in subjects  %}
-                                <option value="{{subject.id}}">{{subject.name}} </option>
+                                {% for assignment in assignments  %}
+                                <option value="{{assignment.id}}">{{assignment.course.course_code}} - {{assignment.course.title}} </option>
                                 {% endfor %}
                             </select>
                         </div>

@@ -55,9 +55,9 @@
                 <!-- small box -->
                 <div class="small-box bg-danger">
                     <div class="inner">
-                        <h3>{{total_subject}}</h3>
+                        <h3>{{total_courses}}</h3>
 
-                        <p>Total Subjects</p>
+                        <p>Total Courses</p>
                     </div>
                     <div class="icon">
                       <i class="nav-icon fas fa-book"></i>
@@ -190,14 +190,14 @@
           options: pieOptions      
         });
 
-        var subject_list = {{ subject_list|safe|escape }};
-        var attendance_list = {{ attendance_list }};
+        var course_list = {{ course_list|safe|default:"[]" }};
+        var attendance_list = {{ attendance_list|default:"[]" }};
   
             var barChartData = {
-      labels  : subject_list,
+      labels  : course_list,
       datasets: [
       {
-        label               : 'Attendance Per Subject',
+        label               : 'Attendance Per Course',
         backgroundColor     : '#17A2B8',
         borderColor         : 'rgba(60,141,188,0.8)',
         pointRadius          : false,

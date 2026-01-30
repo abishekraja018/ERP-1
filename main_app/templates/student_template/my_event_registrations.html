@@ -42,9 +42,9 @@
                                     <tr>
                                         <td>{{ forloop.counter }}</td>
                                         <td>{{ registration.event.title }}</td>
-                                        <td>{{ registration.event.date|date:"d-m-Y H:i" }}</td>
-                                        <td>{{ registration.event.location }}</td>
-                                        <td>{{ registration.registered_at|date:"d-m-Y H:i" }}</td>
+                                        <td>{{ registration.event.start_datetime|date:"d-m-Y H:i" }}</td>
+                                        <td>{{ registration.event.venue }}</td>
+                                        <td>{{ registration.registration_time|date:"d-m-Y H:i" }}</td>
                                         <td>
                                             <a href="{% url 'unregister_event' registration.event.id %}" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure about this?')">Unregister</a>
                                         </td>
