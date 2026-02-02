@@ -23,15 +23,30 @@ from .forms import (
 from .models import (
     Account_User, Faculty_Profile, Student_Profile, Course_Assignment,
     Attendance, LeaveRequest, Feedback, Notification, Publication,
-    Announcement, AcademicYear, Semester, QuestionPaperAssignment
+    Announcement, AcademicYear, Semester, QuestionPaperAssignment,
+    Timetable, TimetableEntry, TimeSlot
 )
 from .utils.web_scrapper import fetch_acoe_updates
 from .utils.cir_scrapper import fetch_cir_ticker_announcements
 
 
-def check_faculty_permission(user):
-    """Check if user is Faculty or Guest Faculty"""
-    return user.is_authenticated and user.role in ['FACULTY', 'GUEST']
+def check_faculty_permission(user, request=None):
+    """
+    Check if user is Faculty, Guest Faculty, or HOD in faculty mode.
+    HOD is identified via Faculty_Profile.designation == 'HOD'.
+    """
+    if not user.is_authenticated:
+        return False
+    
+    # Regular faculty or guest
+    if user.role in ['FACULTY', 'GUEST']:
+        return True
+    
+    # HOD (via Faculty_Profile.designation) can access faculty views
+    if user.is_hod:
+        return True
+    
+    return False
 
 
 # =============================================================================
@@ -692,3 +707,58 @@ def staff_view_qp_details(request, qp_id):
         'page_title': f'QP Details - {qp_assignment.course.course_code}'
     }
     return render(request, "staff_template/staff_qp_details.html", context)
+
+
+# =============================================================================
+# TIMETABLE VIEW
+# =============================================================================
+
+@login_required
+def staff_view_timetable(request):
+    """View faculty's teaching schedule across all batches"""
+    if not check_faculty_permission(request.user):
+        messages.error(request, "Access Denied. Faculty privileges required.")
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    
+    # Get all timetable entries for this faculty
+    entries = TimetableEntry.objects.filter(
+        faculty=faculty
+    ).select_related(
+        'timetable__academic_year', 'timetable__semester', 
+        'course', 'time_slot'
+    ).order_by('timetable', 'day', 'time_slot__slot_number')
+    
+    # Group entries by timetable (batch)
+    timetable_entries = {}
+    for entry in entries:
+        tt_key = entry.timetable.id
+        if tt_key not in timetable_entries:
+            timetable_entries[tt_key] = {
+                'timetable': entry.timetable,
+                'entries': []
+            }
+        timetable_entries[tt_key]['entries'].append(entry)
+    
+    # Get time slots and days for consolidated view
+    time_slots = TimeSlot.objects.all().order_by('slot_number')
+    days = TimetableEntry.DAY_CHOICES
+    
+    # Create consolidated schedule (all batches combined)
+    consolidated_schedule = {}
+    for day_code, day_name in days:
+        consolidated_schedule[day_code] = {}
+        for slot in time_slots:
+            slot_entries = entries.filter(day=day_code, time_slot=slot)
+            consolidated_schedule[day_code][slot.slot_number] = list(slot_entries)
+    
+    context = {
+        'faculty': faculty,
+        'timetable_entries': timetable_entries,
+        'consolidated_schedule': consolidated_schedule,
+        'time_slots': time_slots,
+        'days': days,
+        'page_title': 'My Teaching Schedule'
+    }
+    return render(request, "staff_template/staff_timetable.html", context)

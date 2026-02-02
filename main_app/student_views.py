@@ -24,7 +24,8 @@ from .forms import (
 from .models import (
     Account_User, Student_Profile, Course_Assignment, Attendance, Course,
     LeaveRequest, Feedback, Notification, Event, EventRegistration,
-    Student_Achievement, Announcement
+    Student_Achievement, Announcement, Timetable, TimetableEntry, TimeSlot,
+    AcademicYear, Semester
 )
 from .utils.web_scrapper import fetch_acoe_updates
 from .utils.cir_scrapper import fetch_cir_ticker_announcements
@@ -536,5 +537,98 @@ def my_event_registrations(request):
         'page_title': 'My Event Registrations'
     }
     return render(request, 'student_template/my_event_registrations.html', context)
+
+
+# =============================================================================
+# TIMETABLE VIEW
+# =============================================================================
+
+@login_required
+def student_view_timetable(request):
+    """View student's batch timetable"""
+    if not check_student_permission(request.user):
+        messages.error(request, "Access Denied. Student privileges required.")
+        return redirect('/')
+    
+    student = get_object_or_404(Student_Profile, user=request.user)
+    
+    # Calculate student's current year based on admission year
+    current_date = datetime.now()
+    current_year = current_date.year
+    current_month = current_date.month
+    
+    # If it's after June, consider it the next academic year
+    if current_month >= 6:
+        academic_start_year = current_year
+    else:
+        academic_start_year = current_year - 1
+    
+    # Calculate student year (1-4)
+    if student.admission_year:
+        years_since_admission = academic_start_year - student.admission_year
+        student_year = min(years_since_admission + 1, 4)  # Cap at 4
+    else:
+        # Use current semester to determine year
+        student_year = (student.current_sem + 1) // 2
+    
+    student_year = max(1, min(student_year, 4))  # Ensure between 1-4
+    
+    # Get the current academic year
+    try:
+        current_academic_year = AcademicYear.objects.filter(is_current=True).first()
+        if not current_academic_year:
+            current_academic_year = AcademicYear.objects.order_by('-start_date').first()
+    except:
+        current_academic_year = None
+    
+    # Get the current semester
+    try:
+        current_semester = Semester.objects.filter(is_current=True).first()
+        if not current_semester:
+            current_semester = Semester.objects.order_by('-academic_year', '-semester_number').first()
+    except:
+        current_semester = None
+    
+    # Find the timetable for student's year, batch, and current semester
+    timetable = None
+    if current_academic_year and current_semester:
+        timetable = Timetable.objects.filter(
+            academic_year=current_academic_year,
+            semester=current_semester,
+            year=student_year,
+            batch=student.batch_label,
+            is_active=True
+        ).first()
+    
+    # If no exact match, try finding any active timetable for student's batch and year
+    if not timetable:
+        timetable = Timetable.objects.filter(
+            year=student_year,
+            batch=student.batch_label,
+            is_active=True
+        ).order_by('-academic_year', '-semester').first()
+    
+    time_slots = TimeSlot.objects.all().order_by('slot_number')
+    days = TimetableEntry.DAY_CHOICES
+    
+    entry_lookup = {}
+    if timetable:
+        entries = TimetableEntry.objects.filter(timetable=timetable).select_related(
+            'course', 'faculty__user', 'time_slot'
+        )
+        for entry in entries:
+            key = f"{entry.day}_{entry.time_slot.slot_number}"
+            entry_lookup[key] = entry
+    
+    context = {
+        'student': student,
+        'timetable': timetable,
+        'student_year': student_year,
+        'time_slots': time_slots,
+        'days': days,
+        'entry_lookup': entry_lookup,
+        'page_title': f'My Timetable - Year {student_year} Batch {student.batch_label}'
+    }
+    return render(request, "student_template/student_timetable.html", context)
 
 

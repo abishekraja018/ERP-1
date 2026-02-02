@@ -91,13 +91,40 @@
 
             </ul>
 
+            <!-- Right navbar links -->
+            <ul class="navbar-nav ml-auto">
+                {% if request.user.is_hod %}
+                <!-- HOD View Mode Toggle -->
+                <li class="nav-item">
+                    <a class="nav-link" href="{% url 'toggle_hod_view_mode' %}" title="{% if request.session.hod_view_mode == 'faculty' %}Switch to Admin View{% else %}Switch to Faculty View{% endif %}">
+                        {% if request.session.hod_view_mode == 'faculty' %}
+                        <span class="badge badge-warning" style="padding: 8px 12px; font-size: 14px;">
+                            <i class="fas fa-chalkboard-teacher mr-1"></i> Faculty Mode
+                            <i class="fas fa-exchange-alt ml-2"></i>
+                        </span>
+                        {% else %}
+                        <span class="badge badge-primary" style="padding: 8px 12px; font-size: 14px;">
+                            <i class="fas fa-user-shield mr-1"></i> Admin Mode
+                            <i class="fas fa-exchange-alt ml-2"></i>
+                        </span>
+                        {% endif %}
+                    </a>
+                </li>
+                {% endif %}
+                
+                <!-- User dropdown or logout -->
+                <li class="nav-item">
+                    <a class="nav-link" href="{% url 'user_logout' %}" title="Logout">
+                        <i style="color: white;" class="fas fa-sign-out-alt"></i>
+                    </a>
+                </li>
+            </ul>
 
         </nav>
         <!-- /.navbar -->
 
         <!-- Main Sidebar Container -->
           
- 
         {% include "main_app/sidebar_template.html" with user=user %}
 
       

@@ -8,12 +8,13 @@ from django.forms.widgets import DateInput, TextInput, Select, Textarea
 from django.core.exceptions import ValidationError
 
 from .models import (
-    Account_User, Regulation, AcademicYear, Semester,
+    Account_User, Regulation, AcademicYear, Semester, Program,
     Faculty_Profile, NonTeachingStaff_Profile, Student_Profile,
     Course, Course_Assignment, Attendance,
     Publication, Student_Achievement, Lab_Issue_Log,
     LeaveRequest, Feedback, Event, EventRegistration,
-    Notification, Announcement, QuestionPaperAssignment
+    Notification, Announcement, QuestionPaperAssignment,
+    Timetable, TimetableEntry, TimeSlot
 )
 
 
@@ -124,35 +125,33 @@ class FacultyRegistrationForm(FormSettings):
 
 
 class StudentRegistrationForm(FormSettings):
-    """Combined form for Student user + profile creation"""
+    """Combined form for Student user + profile creation
+    Note: Password is not required here - students set their own password via OTP first-time login
+    Fields match bulk upload CSV format for consistency.
+    """
     
-    # User fields
-    email = forms.EmailField(required=True)
-    full_name = forms.CharField(required=True, max_length=200)
-    password = forms.CharField(widget=forms.PasswordInput, required=True)
-    gender = forms.ChoiceField(choices=Account_User.GENDER_CHOICES, required=False)
-    phone = forms.CharField(max_length=15, required=False)
-    address = forms.CharField(widget=forms.Textarea, required=False)
-    profile_pic = forms.ImageField(required=False)
+    # User fields (required)
+    full_name = forms.CharField(required=True, max_length=200, label='Full Name')
+    email = forms.EmailField(required=True, label='Personal Email', 
+                            help_text='Student will use this email to login')
+    gender = forms.ChoiceField(choices=Account_User.GENDER_CHOICES, required=True, label='Gender')
     
-    # Profile fields
-    register_no = forms.CharField(max_length=12, required=True, label='Register Number')
-    batch_label = forms.ChoiceField(choices=Student_Profile.BATCH_LABEL_CHOICES)
-    branch = forms.ChoiceField(choices=Student_Profile.BRANCH_CHOICES)
-    program_type = forms.ChoiceField(choices=Student_Profile.PROGRAM_TYPE_CHOICES)
-    regulation = forms.ModelChoiceField(queryset=Regulation.objects.filter(is_active=True), required=False)
-    current_sem = forms.IntegerField(min_value=1, max_value=8, initial=1)
-    admission_year = forms.IntegerField(min_value=2000, max_value=2100, required=False)
-    advisor = forms.ModelChoiceField(queryset=Faculty_Profile.objects.all(), required=False)
-    parent_name = forms.CharField(max_length=200, required=False)
-    parent_phone = forms.CharField(max_length=15, required=False)
-    blood_group = forms.CharField(max_length=5, required=False)
+    # Profile fields (required)
+    register_no = forms.CharField(max_length=10, required=True, label='Register Number',
+                                  help_text='10-digit register number (e.g., 2023103543)')
+    batch_label = forms.ChoiceField(choices=Student_Profile.BATCH_LABEL_CHOICES, label='Batch (Section)')
+    branch = forms.ChoiceField(choices=Student_Profile.BRANCH_CHOICES, label='Branch')
+    program_type = forms.ChoiceField(choices=Student_Profile.PROGRAM_TYPE_CHOICES, label='Program Type')
+    admission_year = forms.IntegerField(min_value=2000, max_value=2100, required=True, label='Admission Year')
+    current_sem = forms.IntegerField(min_value=1, max_value=8, initial=1, label='Current Semester')
+    
+    # Optional fields
+    phone = forms.CharField(max_length=15, required=False, label='Phone Number')
     
     class Meta:
         model = Student_Profile
-        fields = ['register_no', 'batch_label', 'branch', 'program_type', 'regulation',
-                  'current_sem', 'admission_year', 'advisor', 'parent_name', 
-                  'parent_phone', 'blood_group']
+        fields = ['register_no', 'batch_label', 'branch', 'program_type',
+                  'current_sem', 'admission_year']
     
     def clean_email(self):
         email = self.cleaned_data['email'].lower()
@@ -162,8 +161,8 @@ class StudentRegistrationForm(FormSettings):
     
     def clean_register_no(self):
         register_no = self.cleaned_data['register_no']
-        if not register_no.isdigit() or len(register_no) != 12:
-            raise ValidationError("Register number must be exactly 12 digits")
+        if not register_no.isdigit() or len(register_no) != 10:
+            raise ValidationError("Register number must be exactly 10 digits")
         if Student_Profile.objects.filter(register_no=register_no).exists():
             raise ValidationError("This Register Number is already registered")
         return register_no
@@ -255,6 +254,23 @@ class RegulationForm(FormSettings):
         widgets = {
             'effective_from': DateInput(attrs={'type': 'date'}),
         }
+
+
+class ProgramForm(FormSettings):
+    """Form for Academic Programs"""
+    
+    class Meta:
+        model = Program
+        fields = ['code', 'name', 'degree', 'level', 'specialization', 
+                  'duration_years', 'total_semesters', 'regulations', 'is_active']
+        widgets = {
+            'regulations': forms.CheckboxSelectMultiple(),
+        }
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['specialization'].required = False
+        self.fields['regulations'].required = False
 
 
 class AcademicYearForm(FormSettings):
@@ -599,3 +615,81 @@ class QuestionPaperReviewForm(FormSettings):
             ('REJECTED', 'Rejected'),
             ('REVISION_REQUIRED', 'Revision Required'),
         ]
+
+
+# =============================================================================
+# TIMETABLE FORMS
+# =============================================================================
+
+class TimetableForm(FormSettings):
+    """Form for creating/editing a Timetable"""
+    
+    class Meta:
+        model = Timetable
+        fields = ['academic_year', 'semester', 'year', 'batch', 'regulation', 'effective_from']
+        widgets = {
+            'effective_from': DateInput(attrs={'type': 'date'}),
+        }
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['academic_year'].queryset = AcademicYear.objects.all().order_by('-start_date')
+        self.fields['semester'].queryset = Semester.objects.all().order_by('-academic_year', 'semester_number')
+        self.fields['regulation'].queryset = Regulation.objects.filter(is_active=True).order_by('-year')
+        self.fields['regulation'].required = False
+
+
+class TimetableEntryForm(FormSettings):
+    """Form for creating/editing a single Timetable Entry"""
+    
+    class Meta:
+        model = TimetableEntry
+        fields = ['day', 'time_slot', 'course', 'faculty', 'is_lab', 'lab_end_slot', 'special_note']
+    
+    def __init__(self, *args, timetable=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields['time_slot'].queryset = TimeSlot.objects.filter(is_break=False).order_by('slot_number')
+        self.fields['lab_end_slot'].queryset = TimeSlot.objects.filter(is_break=False).order_by('slot_number')
+        self.fields['lab_end_slot'].required = False
+        
+        # Filter courses by semester if timetable is provided
+        if timetable:
+            semester_num = timetable.semester.semester_number
+            # Get the corresponding course semester based on year
+            # Year 1: Sem 1,2 | Year 2: Sem 3,4 | Year 3: Sem 5,6 | Year 4: Sem 7,8
+            course_semesters = []
+            if timetable.year == 1:
+                course_semesters = [1, 2]
+            elif timetable.year == 2:
+                course_semesters = [3, 4]
+            elif timetable.year == 3:
+                course_semesters = [5, 6]
+            elif timetable.year == 4:
+                course_semesters = [7, 8]
+            
+            self.fields['course'].queryset = Course.objects.filter(
+                semester__in=course_semesters
+            ).order_by('course_code')
+        else:
+            self.fields['course'].queryset = Course.objects.all().order_by('course_code')
+        
+        # All active faculty
+        self.fields['faculty'].queryset = Faculty_Profile.objects.filter(
+            user__is_active=True
+        ).select_related('user').order_by('user__full_name')
+        
+        # Make course not required (for free periods or special notes)
+        self.fields['course'].required = False
+        self.fields['faculty'].required = False
+
+
+class TimeSlotForm(FormSettings):
+    """Form for creating/editing Time Slots"""
+    
+    class Meta:
+        model = TimeSlot
+        fields = ['slot_number', 'start_time', 'end_time', 'is_break']
+        widgets = {
+            'start_time': forms.TimeInput(attrs={'type': 'time'}),
+            'end_time': forms.TimeInput(attrs={'type': 'time'}),
+        }

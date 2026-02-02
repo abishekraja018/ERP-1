@@ -113,6 +113,26 @@ class Account_User(AbstractUser):
     def last_name_display(self):
         parts = self.full_name.split()
         return parts[-1] if len(parts) > 1 else ""
+    
+    @property
+    def is_hod(self):
+        return self.role == 'HOD'
+    
+    @property
+    def is_faculty(self):
+        return self.role == 'FACULTY'
+    
+    @property
+    def is_staff(self):
+        return self.role == 'STAFF'
+    
+    @property
+    def is_student(self):
+        return self.role == 'STUDENT'
+    
+    @property
+    def is_guest(self):
+        return self.role == 'GUEST'
 
 
 # =============================================================================
@@ -133,6 +153,64 @@ class Regulation(models.Model):
     
     def __str__(self):
         return f"R{self.year}"
+
+
+class Program(models.Model):
+    """
+    Academic Programs offered by the department.
+    Examples:
+    - B.E. Computer Science and Engineering (UG)
+    - M.E. Computer Science and Engineering (PG)
+    - M.E. Computer Science & Engg. Spl. in Operations Research (PG)
+    - M.E. Computer Science & Engg. Spl. in Big Data Analytics (PG)
+    - M.E. Software Engineering (PG)
+    """
+    
+    PROGRAM_LEVEL_CHOICES = [
+        ('UG', 'Undergraduate'),
+        ('PG', 'Postgraduate'),
+        ('PHD', 'Ph.D.'),
+    ]
+    
+    DEGREE_CHOICES = [
+        ('BE', 'B.E.'),
+        ('BTECH', 'B.Tech.'),
+        ('ME', 'M.E.'),
+        ('MTECH', 'M.Tech.'),
+        ('MS', 'M.S.'),
+        ('PHD', 'Ph.D.'),
+    ]
+    
+    code = models.CharField(max_length=20, unique=True, help_text="e.g., CSE, CSE-OR, CSE-BDA, SE")
+    name = models.CharField(max_length=200, help_text="Full program name")
+    degree = models.CharField(max_length=10, choices=DEGREE_CHOICES, default='BE')
+    level = models.CharField(max_length=5, choices=PROGRAM_LEVEL_CHOICES, default='UG')
+    specialization = models.CharField(max_length=200, blank=True, null=True, 
+                                       help_text="e.g., Operations Research, Big Data Analytics")
+    duration_years = models.IntegerField(default=4, validators=[MinValueValidator(1), MaxValueValidator(6)],
+                                          help_text="Program duration in years")
+    total_semesters = models.IntegerField(default=8, validators=[MinValueValidator(1), MaxValueValidator(12)])
+    regulations = models.ManyToManyField(Regulation, related_name='programs', blank=True,
+                                          help_text="Regulations under which this program is offered")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['level', 'name']
+        verbose_name = 'Academic Program'
+        verbose_name_plural = 'Academic Programs'
+    
+    def __str__(self):
+        if self.specialization:
+            return f"{self.get_degree_display()} {self.name} - {self.specialization}"
+        return f"{self.get_degree_display()} {self.name}"
+    
+    @property
+    def full_name(self):
+        """Return full program name with degree"""
+        if self.specialization:
+            return f"{self.get_degree_display()} {self.name} Spl. in {self.specialization}"
+        return f"{self.get_degree_display()} {self.name}"
 
 
 class AcademicYear(models.Model):
@@ -903,6 +981,309 @@ class QuestionPaperAssignment(models.Model):
         from django.utils import timezone
         delta = self.deadline - timezone.now().date()
         return delta.days
+
+
+# =============================================================================
+# TIMETABLE MANAGEMENT
+# =============================================================================
+
+class TimeSlot(models.Model):
+    """Defines time slots for timetable (8 periods per day)"""
+    
+    slot_number = models.IntegerField(unique=True, validators=[MinValueValidator(1), MaxValueValidator(8)])
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    is_break = models.BooleanField(default=False, help_text="Mark True for lunch break slot")
+    
+    class Meta:
+        ordering = ['slot_number']
+        verbose_name = 'Time Slot'
+        verbose_name_plural = 'Time Slots'
+    
+    def __str__(self):
+        return f"Period {self.slot_number}: {self.start_time.strftime('%H:%M')} - {self.end_time.strftime('%H:%M')}"
+
+
+class Timetable(models.Model):
+    """
+    Master timetable for a specific Academic Year + Semester + Year + Batch combination.
+    """
+    
+    YEAR_CHOICES = [
+        (1, '1st Year'),
+        (2, '2nd Year'),
+        (3, '3rd Year'),
+        (4, '4th Year'),
+    ]
+    
+    BATCH_CHOICES = [
+        ('N', 'N Batch'),
+        ('P', 'P Batch'),
+        ('Q', 'Q Batch'),
+    ]
+    
+    academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE, related_name='timetables')
+    semester = models.ForeignKey(Semester, on_delete=models.CASCADE, related_name='timetables')
+    year = models.IntegerField(choices=YEAR_CHOICES)
+    batch = models.CharField(max_length=1, choices=BATCH_CHOICES)
+    regulation = models.ForeignKey(Regulation, on_delete=models.SET_NULL, null=True, blank=True)
+    effective_from = models.DateField(help_text="Date from which this timetable is effective")
+    created_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, 
+                                    related_name='created_timetables')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+    
+    class Meta:
+        unique_together = ('academic_year', 'semester', 'year', 'batch')
+        ordering = ['-academic_year', 'year', 'batch']
+        verbose_name = 'Timetable'
+        verbose_name_plural = 'Timetables'
+    
+    def __str__(self):
+        return f"{self.academic_year} - Sem {self.semester.semester_number} - Year {self.year} - Batch {self.batch}"
+
+
+class TimetableEntry(models.Model):
+    """Individual entry in a timetable (one slot for one day)"""
+    
+    DAY_CHOICES = [
+        ('MON', 'Monday'),
+        ('TUE', 'Tuesday'),
+        ('WED', 'Wednesday'),
+        ('THU', 'Thursday'),
+        ('FRI', 'Friday'),
+    ]
+    
+    timetable = models.ForeignKey(Timetable, on_delete=models.CASCADE, related_name='entries')
+    day = models.CharField(max_length=3, choices=DAY_CHOICES)
+    time_slot = models.ForeignKey(TimeSlot, on_delete=models.CASCADE)
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, null=True, blank=True)
+    faculty = models.ForeignKey(Faculty_Profile, on_delete=models.SET_NULL, null=True, blank=True,
+                                 related_name='timetable_entries')
+    is_lab = models.BooleanField(default=False, help_text="Mark if this is a lab session spanning multiple slots")
+    lab_end_slot = models.ForeignKey(TimeSlot, on_delete=models.SET_NULL, null=True, blank=True,
+                                      related_name='lab_end_entries')
+    special_note = models.CharField(max_length=100, blank=True, null=True)
+    
+    class Meta:
+        unique_together = ('timetable', 'day', 'time_slot')
+        ordering = ['day', 'time_slot']
+        verbose_name = 'Timetable Entry'
+        verbose_name_plural = 'Timetable Entries'
+    
+    def __str__(self):
+        course_info = self.course.course_code if self.course else self.special_note or 'Free'
+        return f"{self.timetable} - {self.day} Period {self.time_slot.slot_number}: {course_info}"
+
+
+# =============================================================================
+# LOGIN OTP
+# =============================================================================
+
+class LoginOTP(models.Model):
+    """OTP for first-time student login via college email"""
+    
+    user = models.ForeignKey(Account_User, on_delete=models.CASCADE, related_name='login_otps')
+    otp = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    is_used = models.BooleanField(default=False)
+    
+    class Meta:
+        verbose_name = 'Login OTP'
+        verbose_name_plural = 'Login OTPs'
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f"OTP for {self.user.email} - {'Used' if self.is_used else 'Active'}"
+    
+    @property
+    def is_expired(self):
+        from django.utils import timezone
+        return timezone.now() > self.expires_at
+    
+    @property
+    def is_valid(self):
+        return not self.is_used and not self.is_expired
+    
+    @classmethod
+    def generate_otp(cls, user, validity_minutes=15):
+        import random
+        from django.utils import timezone
+        
+        cls.objects.filter(user=user, is_used=False).update(is_used=True)
+        otp_code = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+        expires_at = timezone.now() + timedelta(minutes=validity_minutes)
+        
+        otp = cls.objects.create(user=user, otp=otp_code, expires_at=expires_at)
+        return otp
+    
+    @classmethod
+    def verify_otp(cls, user, otp_code):
+        try:
+            otp = cls.objects.filter(user=user, otp=otp_code, is_used=False).latest('created_at')
+            if otp.is_valid:
+                otp.is_used = True
+                otp.save()
+                return True
+            return False
+        except cls.DoesNotExist:
+            return False
+
+
+# =============================================================================
+# SEMESTER PROMOTION
+# =============================================================================
+
+class SemesterPromotion(models.Model):
+    """Tracks semester promotions for audit purposes."""
+    
+    PROMOTION_TYPE_CHOICES = [
+        ('AUTO', 'Automatic'),
+        ('MANUAL', 'Manual'),
+        ('BULK', 'Bulk Promotion'),
+    ]
+    
+    student = models.ForeignKey(Student_Profile, on_delete=models.CASCADE, related_name='promotions')
+    from_semester = models.IntegerField()
+    to_semester = models.IntegerField()
+    from_year = models.IntegerField(help_text="Year of study before promotion")
+    to_year = models.IntegerField(help_text="Year of study after promotion")
+    academic_year = models.ForeignKey(AcademicYear, on_delete=models.SET_NULL, null=True)
+    promotion_type = models.CharField(max_length=10, choices=PROMOTION_TYPE_CHOICES, default='AUTO')
+    promoted_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, blank=True)
+    promoted_at = models.DateTimeField(auto_now_add=True)
+    remarks = models.TextField(blank=True, null=True)
+    
+    class Meta:
+        ordering = ['-promoted_at']
+        verbose_name = 'Semester Promotion'
+        verbose_name_plural = 'Semester Promotions'
+    
+    def __str__(self):
+        return f"{self.student.register_no}: Sem {self.from_semester} → {self.to_semester}"
+
+
+class PromotionSchedule(models.Model):
+    """Stores scheduled promotions to avoid repeated processing."""
+    
+    semester = models.ForeignKey(Semester, on_delete=models.CASCADE, related_name='promotion_schedules')
+    target_semester_number = models.IntegerField(help_text="Students currently in this sem will be promoted")
+    scheduled_date = models.DateField(help_text="5 days before semester start")
+    executed = models.BooleanField(default=False)
+    executed_at = models.DateTimeField(null=True, blank=True)
+    students_promoted = models.IntegerField(default=0)
+    
+    class Meta:
+        unique_together = ('semester', 'target_semester_number')
+        ordering = ['-scheduled_date']
+    
+    def __str__(self):
+        status = "✓ Done" if self.executed else "⏳ Pending"
+        return f"Promote Sem {self.target_semester_number} → {self.target_semester_number + 1} on {self.scheduled_date} [{status}]"
+
+
+# =============================================================================
+# PROMOTION HELPER FUNCTIONS
+# =============================================================================
+
+def check_and_promote_students(promoted_by=None, force=False):
+    """Automatically promotes students 5 days before the next semester starts."""
+    from django.utils import timezone
+    from django.db import transaction
+    
+    today = timezone.now().date()
+    results = {'total_promoted': 0, 'semesters_processed': [], 'errors': []}
+    
+    pending_schedules = PromotionSchedule.objects.filter(
+        scheduled_date__lte=today, executed=False
+    ).select_related('semester', 'semester__academic_year')
+    
+    with transaction.atomic():
+        for schedule in pending_schedules:
+            try:
+                students_to_promote = Student_Profile.objects.filter(
+                    current_sem=schedule.target_semester_number
+                ).exclude(current_sem=8)
+                
+                promoted_count = 0
+                for student in students_to_promote:
+                    old_sem = student.current_sem
+                    old_year = student.year_of_study
+                    student.current_sem += 1
+                    student.save()
+                    
+                    SemesterPromotion.objects.create(
+                        student=student, from_semester=old_sem, to_semester=student.current_sem,
+                        from_year=old_year, to_year=student.year_of_study,
+                        academic_year=schedule.semester.academic_year,
+                        promotion_type='AUTO' if promoted_by is None else 'MANUAL',
+                        promoted_by=promoted_by,
+                        remarks=f"Auto-promoted for {schedule.semester}"
+                    )
+                    promoted_count += 1
+                
+                schedule.executed = True
+                schedule.executed_at = timezone.now()
+                schedule.students_promoted = promoted_count
+                schedule.save()
+                
+                results['total_promoted'] += promoted_count
+                results['semesters_processed'].append({
+                    'semester': str(schedule.semester), 'students': promoted_count
+                })
+            except Exception as e:
+                results['errors'].append({'schedule': str(schedule), 'error': str(e)})
+    
+    return results
+
+
+def create_promotion_schedules_for_semester(semester):
+    """Creates promotion schedules when a new semester is added."""
+    if not semester.start_date:
+        return []
+    
+    scheduled_date = semester.start_date - timedelta(days=5)
+    created_schedules = []
+    target_from_sem = semester.semester_number - 1
+    
+    if target_from_sem > 0:
+        schedule, created = PromotionSchedule.objects.get_or_create(
+            semester=semester, target_semester_number=target_from_sem,
+            defaults={'scheduled_date': scheduled_date}
+        )
+        if created:
+            created_schedules.append(schedule)
+    
+    return created_schedules
+
+
+def promote_students_manually(students, to_semester, promoted_by, academic_year=None):
+    """Manually promote a list of students to a specific semester."""
+    from django.db import transaction
+    
+    results = {'success': 0, 'errors': []}
+    
+    with transaction.atomic():
+        for student in students:
+            try:
+                old_sem = student.current_sem
+                old_year = student.year_of_study
+                student.current_sem = to_semester
+                student.save()
+                
+                SemesterPromotion.objects.create(
+                    student=student, from_semester=old_sem, to_semester=to_semester,
+                    from_year=old_year, to_year=student.year_of_study,
+                    academic_year=academic_year, promotion_type='MANUAL',
+                    promoted_by=promoted_by, remarks="Manual bulk promotion by HOD"
+                )
+                results['success'] += 1
+            except Exception as e:
+                results['errors'].append({'student': str(student), 'error': str(e)})
+    
+    return results
 
 
 # =============================================================================

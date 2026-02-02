@@ -8,10 +8,20 @@ class LoginCheckMiddleWare(MiddlewareMixin):
         modulename = view_func.__module__
         user = request.user  # Who is the current user?
         if user.is_authenticated:
-            if user.role == 'HOD':  # HOD/Admin
-                if modulename == 'main_app.student_views':
-                    return redirect(reverse('admin_home'))
-            elif user.role in ['FACULTY', 'GUEST']:  # Faculty or Guest Faculty
+            # Check if user is HOD (via Faculty_Profile.designation)
+            if user.is_hod:
+                # HOD in faculty mode can access staff_views
+                if request.session.get('hod_view_mode') == 'faculty':
+                    if modulename == 'main_app.student_views':
+                        return redirect(reverse('staff_home'))
+                    # Allow access to staff_views in faculty mode
+                else:
+                    # HOD in admin mode - redirect from student views to admin home
+                    if modulename == 'main_app.student_views':
+                        return redirect(reverse('admin_home'))
+                    # Allow access to both hod_views and staff_views in admin mode
+                    # (HOD can still access faculty features even in admin mode)
+            elif user.role in ['FACULTY', 'GUEST']:  # Faculty or Guest Faculty (non-HOD)
                 if modulename == 'main_app.student_views' or modulename == 'main_app.hod_views':
                     return redirect(reverse('staff_home'))
             elif user.role == 'STUDENT':  # Student
@@ -24,8 +34,19 @@ class LoginCheckMiddleWare(MiddlewareMixin):
             else:  # None of the aforementioned? Please take the user to login page
                 return redirect(reverse('login_page'))
         else:
-            if request.path == reverse('login_page') or modulename == 'django.contrib.auth.views' or request.path == reverse('user_login'):
-                # If the path is login or has anything to do with authentication, pass
+            # Unauthenticated users
+            # Allow access to login-related pages
+            allowed_paths = [
+                reverse('login_page'),
+                reverse('user_login'),
+                reverse('student_first_login'),
+                reverse('send_student_otp'),
+                reverse('verify_student_otp'),
+                reverse('student_set_password'),
+            ]
+            
+            if request.path in allowed_paths or modulename == 'django.contrib.auth.views':
+                # Allow access to authentication-related pages
                 pass
             else:
                 return redirect(reverse('login_page'))

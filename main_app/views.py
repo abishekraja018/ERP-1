@@ -18,7 +18,7 @@ from main_app.utils.cir_scrapper import fetch_cir_news, fetch_cir_ticker_announc
 from .EmailBackend import EmailBackend
 from .models import (
     Account_User, Attendance, Course_Assignment, AcademicYear, Semester,
-    Announcement, Notification
+    Announcement, Notification, LoginOTP, Student_Profile
 )
 
 
@@ -29,14 +29,26 @@ from .models import (
 def login_page(request):
     """Login page - redirects authenticated users to their dashboard"""
     if request.user.is_authenticated:
-        return redirect_to_dashboard(request.user)
+        return redirect_to_dashboard(request.user, request)
     return render(request, 'main_app/login.html')
 
 
-def redirect_to_dashboard(user):
-    """Redirect user to appropriate dashboard based on role"""
+def redirect_to_dashboard(user, request=None):
+    """
+    Redirect user to appropriate dashboard based on role/designation.
+    
+    HOD (identified via Faculty_Profile.designation == 'HOD') goes to admin_home by default.
+    When HOD is in faculty mode (hod_view_mode == 'faculty'), redirect to staff_home.
+    """
+    # Check if user is HOD (via faculty_profile designation)
+    if user.is_hod:
+        # Check if HOD is in faculty view mode
+        if request and request.session.get('hod_view_mode') == 'faculty':
+            return redirect(reverse('staff_home'))
+        return redirect(reverse('admin_home'))
+    
+    # Other roles based on Account_User.role
     role_redirects = {
-        'HOD': 'admin_home',
         'FACULTY': 'staff_home',
         'GUEST': 'staff_home',
         'STAFF': 'staff_home',
@@ -93,7 +105,7 @@ def doLogin(request, **kwargs):
         
         login(request, user)
         messages.success(request, f"Welcome, {user.full_name}!")
-        return redirect_to_dashboard(user)
+        return redirect_to_dashboard(user, request)
     else:
         messages.error(request, "Invalid email or password")
         return redirect("/")
@@ -105,6 +117,187 @@ def logout_user(request):
         logout(request)
         messages.success(request, "You have been logged out successfully.")
     return redirect("/")
+
+
+# =============================================================================
+# FIRST-TIME STUDENT LOGIN WITH OTP
+# =============================================================================
+
+def student_first_login(request):
+    """First-time login page for students using OTP"""
+    if request.user.is_authenticated:
+        return redirect_to_dashboard(request.user, request)
+    return render(request, 'main_app/student_first_login.html')
+
+
+def send_student_otp(request):
+    """Send OTP to student's college email for first-time login"""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Invalid request method'}, status=405)
+    
+    register_no = request.POST.get('register_no', '').strip()
+    
+    if not register_no or len(register_no) != 10 or not register_no.isdigit():
+        return JsonResponse({'error': 'Please enter a valid 10-digit register number'}, status=400)
+    
+    try:
+        student = Student_Profile.objects.get(register_no=register_no)
+        user = student.user
+        
+        # Check if user already has a password set
+        if user.has_usable_password():
+            return JsonResponse({
+                'error': 'You have already set your password. Please use regular login.',
+                'redirect': '/'
+            }, status=400)
+        
+        # Generate OTP
+        otp = LoginOTP.generate_otp(user)
+        
+        # Send OTP to college email
+        college_email = student.college_email
+        from django.core.mail import send_mail
+        from django.conf import settings
+        
+        subject = 'CSE Department ERP - Login OTP'
+        message = f"""
+Dear {user.full_name},
+
+Your OTP for first-time login to the CSE Department ERP System is:
+
+    {otp.otp}
+
+This OTP is valid for 15 minutes.
+
+If you did not request this, please ignore this email.
+
+Regards,
+CSE Department
+College of Engineering Guindy
+Anna University
+        """
+        
+        try:
+            send_mail(
+                subject,
+                message,
+                settings.EMAIL_HOST_USER,
+                [college_email],
+                fail_silently=False,
+            )
+            # Mask email for display
+            masked_email = college_email[:4] + '****' + college_email[college_email.index('@'):]
+            return JsonResponse({
+                'success': True,
+                'message': f'OTP sent to your college email ({masked_email})',
+                'register_no': register_no
+            })
+        except Exception as e:
+            return JsonResponse({'error': f'Failed to send OTP: {str(e)}'}, status=500)
+            
+    except Student_Profile.DoesNotExist:
+        return JsonResponse({'error': 'Register number not found. Please contact the department.'}, status=404)
+
+
+def verify_student_otp(request):
+    """Verify OTP and allow student to set password"""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Invalid request method'}, status=405)
+    
+    register_no = request.POST.get('register_no', '').strip()
+    otp_code = request.POST.get('otp', '').strip()
+    
+    if not register_no or not otp_code:
+        return JsonResponse({'error': 'Register number and OTP are required'}, status=400)
+    
+    try:
+        student = Student_Profile.objects.get(register_no=register_no)
+        user = student.user
+        
+        if LoginOTP.verify_otp(user, otp_code):
+            # Store in session for password setup
+            request.session['otp_verified_user_id'] = str(user.id)
+            request.session['otp_verified_register_no'] = register_no
+            return JsonResponse({
+                'success': True,
+                'message': 'OTP verified successfully',
+                'redirect': reverse('student_set_password')
+            })
+        else:
+            return JsonResponse({'error': 'Invalid or expired OTP. Please try again.'}, status=400)
+            
+    except Student_Profile.DoesNotExist:
+        return JsonResponse({'error': 'Register number not found'}, status=404)
+
+
+def student_set_password(request):
+    """Allow student to set password after OTP verification"""
+    # Check if OTP was verified
+    user_id = request.session.get('otp_verified_user_id')
+    register_no = request.session.get('otp_verified_register_no')
+    
+    if not user_id or not register_no:
+        messages.error(request, 'Please verify your OTP first.')
+        return redirect('student_first_login')
+    
+    try:
+        user = Account_User.objects.get(id=user_id)
+    except Account_User.DoesNotExist:
+        messages.error(request, 'User not found. Please try again.')
+        return redirect('student_first_login')
+    
+    if request.method == 'POST':
+        password = request.POST.get('password', '')
+        confirm_password = request.POST.get('confirm_password', '')
+        
+        if len(password) < 8:
+            messages.error(request, 'Password must be at least 8 characters long.')
+            return render(request, 'main_app/student_set_password.html', {'register_no': register_no})
+        
+        if password != confirm_password:
+            messages.error(request, 'Passwords do not match.')
+            return render(request, 'main_app/student_set_password.html', {'register_no': register_no})
+        
+        # Set password
+        user.set_password(password)
+        user.save()
+        
+        # Clear session
+        del request.session['otp_verified_user_id']
+        del request.session['otp_verified_register_no']
+        
+        # Send confirmation to personal email
+        from django.core.mail import send_mail
+        from django.conf import settings
+        
+        try:
+            send_mail(
+                'CSE Department ERP - Password Set Successfully',
+                f"""
+Dear {user.full_name},
+
+Your password has been set successfully for the CSE Department ERP System.
+
+You can now login using:
+Email: {user.email}
+Password: (the password you just set)
+
+If you did not do this, please contact the department immediately.
+
+Regards,
+CSE Department
+                """,
+                settings.EMAIL_HOST_USER,
+                [user.email],
+                fail_silently=True,
+            )
+        except:
+            pass
+        
+        messages.success(request, 'Password set successfully! You can now login.')
+        return redirect('login_page')
+    
+    return render(request, 'main_app/student_set_password.html', {'register_no': register_no})
 
 
 # =============================================================================

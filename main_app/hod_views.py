@@ -4,7 +4,10 @@ HOD (Head of Department) Views
 """
 
 import json
+import csv
+import io
 import requests
+import uuid
 from django.contrib import messages
 from django.core.files.storage import FileSystemStorage
 from django.http import HttpResponse, JsonResponse
@@ -15,27 +18,64 @@ from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.decorators import login_required
 from django.db.models import Count, Q
 from datetime import datetime
+from django.core.mail import send_mail
+from django.conf import settings
+from django.contrib.auth.tokens import default_token_generator
+from django.utils.http import urlsafe_base64_encode
+from django.utils.encoding import force_bytes
 
 from .forms import (
     FacultyRegistrationForm, StudentRegistrationForm, NonTeachingStaffRegistrationForm,
     CourseForm, CourseAssignmentForm, RegulationForm, AcademicYearForm, SemesterForm,
     EventForm, LeaveApprovalForm, FeedbackReplyForm, AnnouncementForm,
     FacultyProfileEditForm, StudentProfileEditForm, AccountUserForm,
-    QuestionPaperAssignmentForm, QuestionPaperReviewForm
+    QuestionPaperAssignmentForm, QuestionPaperReviewForm,
+    TimetableForm, TimetableEntryForm, TimeSlotForm, ProgramForm
 )
 from .models import (
     Account_User, Faculty_Profile, Student_Profile, NonTeachingStaff_Profile,
     Course, Course_Assignment, Attendance, Regulation, AcademicYear, Semester,
     Publication, Student_Achievement, Lab_Issue_Log, LeaveRequest, Feedback,
-    Event, EventRegistration, Notification, Announcement, QuestionPaperAssignment
+    Event, EventRegistration, Notification, Announcement, QuestionPaperAssignment,
+    Timetable, TimetableEntry, TimeSlot, Program
 )
 from .utils.web_scrapper import fetch_acoe_updates
 from .utils.cir_scrapper import fetch_cir_ticker_announcements
 
-
 def check_hod_permission(user):
-    """Check if user is HOD"""
-    return user.is_authenticated and user.role == 'HOD'
+    """
+    Check if user has HOD privileges.
+    HOD is identified via Faculty_Profile.designation == 'HOD',
+    not by Account_User.role field.
+    """
+    if not user.is_authenticated:
+        return False
+    return user.is_hod
+
+
+# =============================================================================
+# HOD VIEW MODE TOGGLE
+# =============================================================================
+
+@login_required
+def toggle_hod_view_mode(request):
+    """Toggle HOD between Admin and Faculty view modes"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    # Toggle the view mode
+    current_mode = request.session.get('hod_view_mode', 'admin')
+    new_mode = 'faculty' if current_mode == 'admin' else 'admin'
+    request.session['hod_view_mode'] = new_mode
+    
+    # Redirect to appropriate dashboard
+    if new_mode == 'faculty':
+        messages.success(request, "Switched to Faculty View")
+        return redirect('staff_home')
+    else:
+        messages.success(request, "Switched to Admin View")
+        return redirect('admin_home')
 
 
 # =============================================================================
@@ -301,7 +341,9 @@ def delete_faculty(request, faculty_id):
 
 @login_required
 def add_student(request):
-    """Add new student"""
+    """Add new student - password is set by student via OTP first-time login
+    Fields match bulk upload for consistency.
+    """
     if not check_hod_permission(request.user):
         return redirect('/')
     
@@ -311,40 +353,42 @@ def add_student(request):
     if request.method == 'POST':
         if form.is_valid():
             try:
-                # Create user
-                user = Account_User.objects.create_user(
+                # Create user without password (student will set via OTP)
+                user = Account_User.objects.create(
                     email=form.cleaned_data['email'],
-                    password=form.cleaned_data['password'],
                     full_name=form.cleaned_data['full_name'],
                     role='STUDENT',
-                    gender=form.cleaned_data.get('gender'),
-                    phone=form.cleaned_data.get('phone'),
-                    address=form.cleaned_data.get('address'),
+                    gender=form.cleaned_data['gender'],
+                    phone=form.cleaned_data.get('phone') or None,
+                    is_active=True
                 )
+                # Mark password as unusable until student sets it
+                user.set_unusable_password()
+                user.save()
                 
-                # Handle profile pic
-                if 'profile_pic' in request.FILES:
-                    fs = FileSystemStorage()
-                    filename = fs.save(request.FILES['profile_pic'].name, request.FILES['profile_pic'])
-                    user.profile_pic = fs.url(filename)
-                    user.save()
-                
-                # Update student profile
+                # Update student profile (auto-created by signal)
                 student = user.student_profile
                 student.register_no = form.cleaned_data['register_no']
                 student.batch_label = form.cleaned_data['batch_label']
                 student.branch = form.cleaned_data['branch']
                 student.program_type = form.cleaned_data['program_type']
-                student.regulation = form.cleaned_data.get('regulation')
+                student.admission_year = form.cleaned_data['admission_year']
                 student.current_sem = form.cleaned_data.get('current_sem', 1)
-                student.admission_year = form.cleaned_data.get('admission_year')
-                student.advisor = form.cleaned_data.get('advisor')
-                student.parent_name = form.cleaned_data.get('parent_name')
-                student.parent_phone = form.cleaned_data.get('parent_phone')
-                student.blood_group = form.cleaned_data.get('blood_group')
                 student.save()
                 
-                messages.success(request, "Student added successfully!")
+                # Send first-time login notification to college email
+                try:
+                    student_data = {
+                        'name': user.full_name,
+                        'register_no': student.register_no,
+                        'email': user.email,
+                        'college_email': student.college_email,
+                    }
+                    send_first_login_notification(student_data)
+                    messages.success(request, f"Student added successfully! Login instructions sent to {student.college_email}")
+                except Exception as e:
+                    messages.warning(request, f"Student added but email notification failed: {str(e)}")
+                
                 return redirect(reverse('add_student'))
             except Exception as e:
                 messages.error(request, f"Could not add student: {str(e)}")
@@ -771,6 +815,84 @@ def manage_regulation(request):
     regulations = Regulation.objects.all()
     context = {'regulations': regulations, 'page_title': 'Manage Regulations'}
     return render(request, "hod_template/manage_regulation.html", context)
+
+
+# =============================================================================
+# PROGRAM MANAGEMENT
+# =============================================================================
+
+@login_required
+def add_program(request):
+    """Add academic program"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    form = ProgramForm(request.POST or None)
+    context = {'form': form, 'page_title': 'Add Academic Program'}
+    
+    if request.method == 'POST':
+        if form.is_valid():
+            try:
+                form.save()
+                messages.success(request, "Program added successfully!")
+                return redirect(reverse('manage_programs'))
+            except Exception as e:
+                messages.error(request, f"Could not add: {str(e)}")
+        else:
+            messages.error(request, "Please fill all required fields correctly")
+    
+    return render(request, "hod_template/add_program.html", context)
+
+
+@login_required
+def manage_programs(request):
+    """Manage academic programs"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    programs = Program.objects.all().prefetch_related('regulations')
+    context = {'programs': programs, 'page_title': 'Manage Programs'}
+    return render(request, "hod_template/manage_programs.html", context)
+
+
+@login_required
+def edit_program(request, program_id):
+    """Edit academic program"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    program = get_object_or_404(Program, id=program_id)
+    form = ProgramForm(request.POST or None, instance=program)
+    context = {'form': form, 'program': program, 'page_title': f'Edit Program - {program.code}'}
+    
+    if request.method == 'POST':
+        if form.is_valid():
+            try:
+                form.save()
+                messages.success(request, "Program updated successfully!")
+                return redirect(reverse('manage_programs'))
+            except Exception as e:
+                messages.error(request, f"Could not update: {str(e)}")
+        else:
+            messages.error(request, "Please correct the errors")
+    
+    return render(request, "hod_template/edit_program.html", context)
+
+
+@login_required
+def delete_program(request, program_id):
+    """Delete academic program"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    try:
+        program = get_object_or_404(Program, id=program_id)
+        program.delete()
+        messages.success(request, "Program deleted successfully")
+    except Exception as e:
+        messages.error(request, f"Could not delete: {str(e)}")
+    
+    return redirect(reverse('manage_programs'))
 
 
 # =============================================================================
@@ -1453,3 +1575,873 @@ admin_notify_staff = send_notification_page
 admin_notify_student = send_notification_page
 send_student_notification = send_notification
 send_staff_notification = send_notification
+
+
+# =============================================================================
+# TIMETABLE MANAGEMENT
+# =============================================================================
+
+@login_required
+def manage_timetables(request):
+    """List all timetables with filtering options"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    timetables = Timetable.objects.all().select_related(
+        'academic_year', 'semester', 'regulation', 'created_by'
+    ).order_by('-academic_year', 'year', 'batch')
+    
+    # Filtering
+    year_filter = request.GET.get('year')
+    batch_filter = request.GET.get('batch')
+    academic_year_filter = request.GET.get('academic_year')
+    
+    if year_filter:
+        timetables = timetables.filter(year=year_filter)
+    if batch_filter:
+        timetables = timetables.filter(batch=batch_filter)
+    if academic_year_filter:
+        timetables = timetables.filter(academic_year_id=academic_year_filter)
+    
+    academic_years = AcademicYear.objects.all().order_by('-start_date')
+    
+    context = {
+        'timetables': timetables,
+        'academic_years': academic_years,
+        'year_choices': Timetable.YEAR_CHOICES,
+        'batch_choices': Timetable.BATCH_CHOICES,
+        'page_title': 'Manage Timetables'
+    }
+    return render(request, 'hod_template/manage_timetables.html', context)
+
+
+@login_required
+def add_timetable(request):
+    """Create a new timetable"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    if request.method == 'POST':
+        form = TimetableForm(request.POST)
+        if form.is_valid():
+            timetable = form.save(commit=False)
+            timetable.created_by = request.user
+            timetable.save()
+            messages.success(request, f"Timetable created successfully for Year {timetable.year} - Batch {timetable.batch}")
+            return redirect('edit_timetable', timetable_id=timetable.id)
+        else:
+            messages.error(request, "Error creating timetable. Please check the form.")
+    else:
+        form = TimetableForm()
+    
+    context = {
+        'form': form,
+        'page_title': 'Create New Timetable'
+    }
+    return render(request, 'hod_template/add_timetable.html', context)
+
+
+@login_required
+def edit_timetable(request, timetable_id):
+    """Edit timetable - main grid view for entering schedule"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    timetable = get_object_or_404(Timetable, id=timetable_id)
+    
+    # Ensure time slots exist, create defaults if not
+    if TimeSlot.objects.count() == 0:
+        create_default_time_slots()
+    
+    time_slots = TimeSlot.objects.all().order_by('slot_number')
+    days = TimetableEntry.DAY_CHOICES
+    
+    # Get existing entries
+    entries = TimetableEntry.objects.filter(timetable=timetable).select_related(
+        'course', 'faculty__user', 'time_slot'
+    )
+    
+    # Create lookup dictionary for entries
+    entry_lookup = {}
+    for entry in entries:
+        key = f"{entry.day}_{entry.time_slot.slot_number}"
+        entry_lookup[key] = entry
+    
+    # Get courses for this year's semester
+    course_semesters = []
+    if timetable.year == 1:
+        course_semesters = [1, 2]
+    elif timetable.year == 2:
+        course_semesters = [3, 4]
+    elif timetable.year == 3:
+        course_semesters = [5, 6]
+    elif timetable.year == 4:
+        course_semesters = [7, 8]
+    
+    courses = Course.objects.filter(semester__in=course_semesters).order_by('course_code')
+    faculty_list = Faculty_Profile.objects.filter(user__is_active=True).select_related('user').order_by('user__full_name')
+    
+    context = {
+        'timetable': timetable,
+        'time_slots': time_slots,
+        'days': days,
+        'entry_lookup': entry_lookup,
+        'courses': courses,
+        'faculty_list': faculty_list,
+        'page_title': f'Edit Timetable - Year {timetable.year} Batch {timetable.batch}'
+    }
+    return render(request, 'hod_template/edit_timetable.html', context)
+
+
+@login_required
+@csrf_exempt
+def save_timetable_entry(request):
+    """AJAX endpoint to save a single timetable entry"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Access Denied'}, status=403)
+    
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body)
+            timetable_id = data.get('timetable_id')
+            day = data.get('day')
+            slot_number = data.get('slot_number')
+            course_code = data.get('course_code')
+            faculty_id = data.get('faculty_id')
+            special_note = data.get('special_note', '')
+            
+            timetable = get_object_or_404(Timetable, id=timetable_id)
+            time_slot = get_object_or_404(TimeSlot, slot_number=slot_number)
+            
+            # Get or create entry
+            entry, created = TimetableEntry.objects.get_or_create(
+                timetable=timetable,
+                day=day,
+                time_slot=time_slot,
+                defaults={'special_note': special_note}
+            )
+            
+            # Update entry
+            if course_code:
+                entry.course = Course.objects.filter(course_code=course_code).first()
+            else:
+                entry.course = None
+            
+            if faculty_id:
+                entry.faculty = Faculty_Profile.objects.filter(id=faculty_id).first()
+            else:
+                entry.faculty = None
+            
+            entry.special_note = special_note
+            entry.save()
+            
+            return JsonResponse({
+                'success': True,
+                'message': 'Entry saved',
+                'entry_id': entry.id,
+                'display_text': entry.display_text,
+                'faculty_name': entry.faculty_name
+            })
+        except Exception as e:
+            return JsonResponse({'error': str(e)}, status=400)
+    
+    return JsonResponse({'error': 'Invalid request'}, status=400)
+
+
+@login_required
+@csrf_exempt
+def delete_timetable_entry(request):
+    """AJAX endpoint to delete a timetable entry"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Access Denied'}, status=403)
+    
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body)
+            timetable_id = data.get('timetable_id')
+            day = data.get('day')
+            slot_number = data.get('slot_number')
+            
+            TimetableEntry.objects.filter(
+                timetable_id=timetable_id,
+                day=day,
+                time_slot__slot_number=slot_number
+            ).delete()
+            
+            return JsonResponse({'success': True, 'message': 'Entry deleted'})
+        except Exception as e:
+            return JsonResponse({'error': str(e)}, status=400)
+    
+    return JsonResponse({'error': 'Invalid request'}, status=400)
+
+
+@login_required
+def delete_timetable(request, timetable_id):
+    """Delete a timetable"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    timetable = get_object_or_404(Timetable, id=timetable_id)
+    timetable.delete()
+    messages.success(request, "Timetable deleted successfully.")
+    return redirect('manage_timetables')
+
+
+@login_required
+def view_timetable(request, timetable_id):
+    """View a timetable (read-only)"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    timetable = get_object_or_404(Timetable, id=timetable_id)
+    
+    time_slots = TimeSlot.objects.all().order_by('slot_number')
+    days = TimetableEntry.DAY_CHOICES
+    
+    entries = TimetableEntry.objects.filter(timetable=timetable).select_related(
+        'course', 'faculty__user', 'time_slot'
+    )
+    
+    entry_lookup = {}
+    for entry in entries:
+        key = f"{entry.day}_{entry.time_slot.slot_number}"
+        entry_lookup[key] = entry
+    
+    context = {
+        'timetable': timetable,
+        'time_slots': time_slots,
+        'days': days,
+        'entry_lookup': entry_lookup,
+        'page_title': f'Timetable - Year {timetable.year} Batch {timetable.batch}'
+    }
+    return render(request, 'hod_template/view_timetable.html', context)
+
+
+@login_required
+def manage_time_slots(request):
+    """Manage time slots configuration"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    time_slots = TimeSlot.objects.all().order_by('slot_number')
+    
+    if request.method == 'POST':
+        action = request.POST.get('action')
+        
+        if action == 'create_defaults':
+            create_default_time_slots()
+            messages.success(request, "Default time slots created successfully.")
+            return redirect('manage_time_slots')
+        
+        elif action == 'add':
+            form = TimeSlotForm(request.POST)
+            if form.is_valid():
+                form.save()
+                messages.success(request, "Time slot added successfully.")
+                return redirect('manage_time_slots')
+            else:
+                messages.error(request, "Error adding time slot.")
+        
+        elif action == 'delete':
+            slot_id = request.POST.get('slot_id')
+            TimeSlot.objects.filter(id=slot_id).delete()
+            messages.success(request, "Time slot deleted.")
+            return redirect('manage_time_slots')
+    
+    form = TimeSlotForm()
+    
+    context = {
+        'time_slots': time_slots,
+        'form': form,
+        'page_title': 'Manage Time Slots'
+    }
+    return render(request, 'hod_template/manage_time_slots.html', context)
+
+
+def create_default_time_slots():
+    """Create default time slots based on the provided schedule"""
+    default_slots = [
+        (1, '08:30', '09:20', False),
+        (2, '09:25', '10:15', False),
+        (3, '10:30', '11:20', False),
+        (4, '11:25', '12:15', False),
+        # Lunch break (slot 5 could be implicit or we skip)
+        (5, '13:10', '14:00', False),
+        (6, '14:05', '14:55', False),
+        (7, '15:00', '15:50', False),
+        (8, '15:55', '16:45', False),
+    ]
+    
+    for slot_num, start, end, is_break in default_slots:
+        TimeSlot.objects.get_or_create(
+            slot_number=slot_num,
+            defaults={
+                'start_time': start,
+                'end_time': end,
+                'is_break': is_break
+            }
+        )
+
+
+@login_required
+@csrf_exempt
+def get_courses_for_semester(request):
+    """AJAX endpoint to get courses for a specific year/semester"""
+    if request.method == 'GET':
+        year = request.GET.get('year')
+        
+        try:
+            year = int(year)
+            # Map year to semesters
+            course_semesters = []
+            if year == 1:
+                course_semesters = [1, 2]
+            elif year == 2:
+                course_semesters = [3, 4]
+            elif year == 3:
+                course_semesters = [5, 6]
+            elif year == 4:
+                course_semesters = [7, 8]
+            
+            courses = Course.objects.filter(semester__in=course_semesters).order_by('course_code')
+            course_list = [{'code': c.course_code, 'title': c.title} for c in courses]
+            
+            return JsonResponse({'courses': course_list})
+        except Exception as e:
+            return JsonResponse({'error': str(e)}, status=400)
+    
+    return JsonResponse({'error': 'Invalid request'}, status=400)
+
+
+@login_required
+@csrf_exempt  
+def get_all_faculty(request):
+    """AJAX endpoint to get all active faculty with search support"""
+    if request.method == 'GET':
+        search = request.GET.get('search', '')
+        
+        faculty_qs = Faculty_Profile.objects.filter(user__is_active=True).select_related('user')
+        
+        if search:
+            faculty_qs = faculty_qs.filter(
+                Q(user__full_name__icontains=search) | 
+                Q(staff_id__icontains=search)
+            )
+        
+        faculty_list = [{
+            'id': f.id,
+            'name': f.user.full_name,
+            'staff_id': f.staff_id,
+            'designation': f.get_designation_display()
+        } for f in faculty_qs.order_by('user__full_name')[:50]]
+        
+        return JsonResponse({'faculty': faculty_list})
+    
+    return JsonResponse({'error': 'Invalid request'}, status=400)
+
+
+# =============================================================================
+# BULK STUDENT UPLOAD
+# =============================================================================
+
+@login_required
+def bulk_upload_students(request):
+    """Bulk upload students via CSV file"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    if request.method == 'POST':
+        csv_file = request.FILES.get('csv_file')
+        
+        if not csv_file:
+            messages.error(request, "Please upload a CSV file")
+            return redirect('bulk_upload_students')
+        
+        if not csv_file.name.endswith('.csv'):
+            messages.error(request, "Please upload a valid CSV file")
+            return redirect('bulk_upload_students')
+        
+        try:
+            # Read CSV file (handle BOM from Excel)
+            file_content = csv_file.read()
+            # Try UTF-8 with BOM first, then regular UTF-8
+            try:
+                decoded_file = file_content.decode('utf-8-sig')  # Handles BOM
+            except:
+                decoded_file = file_content.decode('utf-8')
+            io_string = io.StringIO(decoded_file)
+            reader = csv.DictReader(io_string)
+            
+            success_count = 0
+            error_count = 0
+            errors = []
+            created_students = []
+            
+            for row_num, row in enumerate(reader, start=2):  # Start from 2 (header is row 1)
+                try:
+                    # Validate required fields
+                    register_no = row.get('register_no', '').strip()
+                    
+                    # Handle Excel scientific notation (e.g., 1.24E+09 -> 1240000000)
+                    if 'E' in register_no.upper() or 'e' in register_no:
+                        try:
+                            register_no = str(int(float(register_no)))
+                        except ValueError:
+                            pass
+                    
+                    full_name = row.get('full_name', '').strip()
+                    email = row.get('email', '').strip().lower()
+                    gender = row.get('gender', '').strip().upper()
+                    batch = row.get('batch', '').strip().upper()
+                    branch = row.get('branch', '').strip().upper()
+                    program = row.get('program', 'UG').strip().upper()
+                    admission_year = row.get('admission_year', '').strip()
+                    current_sem = row.get('current_sem', '1').strip()
+                    
+                    # Optional fields
+                    phone = row.get('phone', '').strip()
+                    parent_name = row.get('parent_name', '').strip()
+                    parent_phone = row.get('parent_phone', '').strip()
+                    address = row.get('address', '').strip()
+                    
+                    # Validation
+                    if not all([register_no, full_name, email, gender, batch, branch, admission_year]):
+                        errors.append(f"Row {row_num}: Missing required fields")
+                        error_count += 1
+                        continue
+                    
+                    if len(register_no) != 10 or not register_no.isdigit():
+                        errors.append(f"Row {row_num}: Register number must be 10 digits (got '{register_no}' with length {len(register_no)})")
+                        error_count += 1
+                        continue
+                    
+                    if gender not in ['M', 'F', 'O']:
+                        errors.append(f"Row {row_num}: Gender must be M, F, or O")
+                        error_count += 1
+                        continue
+                    
+                    if batch not in ['N', 'P', 'Q']:
+                        errors.append(f"Row {row_num}: Batch must be N, P, or Q")
+                        error_count += 1
+                        continue
+                    
+                    if branch not in ['CSE', 'AIML', 'CSBS']:
+                        errors.append(f"Row {row_num}: Branch must be CSE, AIML, or CSBS")
+                        error_count += 1
+                        continue
+                    
+                    # Map program
+                    program_map = {'B.E': 'UG', 'BE': 'UG', 'UG': 'UG', 'M.E': 'PG', 'ME': 'PG', 'PG': 'PG', 'PH.D': 'PHD', 'PHD': 'PHD'}
+                    program_type = program_map.get(program, 'UG')
+                    
+                    # Check duplicates
+                    if Account_User.objects.filter(email=email).exists():
+                        errors.append(f"Row {row_num}: Email {email} already exists")
+                        error_count += 1
+                        continue
+                    
+                    if Student_Profile.objects.filter(register_no=register_no).exists():
+                        errors.append(f"Row {row_num}: Register number {register_no} already exists")
+                        error_count += 1
+                        continue
+                    
+                    # Create user with unusable password (forces password setup)
+                    user = Account_User.objects.create(
+                        email=email,
+                        full_name=full_name,
+                        gender=gender,
+                        phone=phone or None,
+                        address=address or None,
+                        role='STUDENT',
+                        is_active=True
+                    )
+                    user.set_unusable_password()  # User must set password via email
+                    user.save()
+                    
+                    # Update student profile (auto-created by signal)
+                    student = user.student_profile
+                    student.register_no = register_no
+                    student.batch_label = batch
+                    student.branch = branch
+                    student.program_type = program_type
+                    student.admission_year = int(admission_year)
+                    student.current_sem = int(current_sem) if current_sem else 1
+                    student.parent_name = parent_name or None
+                    student.parent_phone = parent_phone or None
+                    student.save()
+                    
+                    created_students.append({
+                        'user': user,
+                        'email': email,
+                        'name': full_name,
+                        'college_email': student.college_email,
+                        'register_no': register_no
+                    })
+                    success_count += 1
+                    
+                except Exception as e:
+                    errors.append(f"Row {row_num}: {str(e)}")
+                    error_count += 1
+            
+            # Send OTP emails to college email for first-time login
+            email_success = 0
+            email_failed = 0
+            for student_data in created_students:
+                try:
+                    send_first_login_notification(student_data)
+                    email_success += 1
+                except Exception as e:
+                    email_failed += 1
+            
+            # Show results
+            if success_count > 0:
+                messages.success(request, f"Successfully created {success_count} students. Login instructions sent to college emails: {email_success}")
+            if error_count > 0:
+                messages.warning(request, f"Failed to create {error_count} students. See details below.")
+            
+            context = {
+                'page_title': 'Bulk Upload Results',
+                'success_count': success_count,
+                'error_count': error_count,
+                'errors': errors[:20],  # Show first 20 errors
+                'total_errors': len(errors),
+                'email_success': email_success,
+                'email_failed': email_failed,
+            }
+            return render(request, 'hod_template/bulk_upload_results.html', context)
+            
+        except Exception as e:
+            messages.error(request, f"Error processing CSV file: {str(e)}")
+            return redirect('bulk_upload_students')
+    
+    context = {
+        'page_title': 'Bulk Upload Students'
+    }
+    return render(request, 'hod_template/bulk_upload_students.html', context)
+
+
+@login_required
+def download_student_template(request):
+    """Download CSV template for bulk student upload"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = 'attachment; filename="student_upload_template.csv"'
+    
+    writer = csv.writer(response)
+    # Header row
+    writer.writerow([
+        'register_no', 'full_name', 'email', 'gender', 'batch', 'branch', 
+        'program', 'admission_year', 'current_sem', 'phone', 'parent_name', 
+        'parent_phone', 'address'
+    ])
+    # Sample data rows
+    writer.writerow([
+        '2023105001', 'John Doe', 'john.doe@student.edu', 'M', 'N', 'CSE',
+        'B.E', '2023', '1', '9876543210', 'Mr. Doe', '9876543211', 'Chennai'
+    ])
+    writer.writerow([
+        '2023105002', 'Jane Smith', 'jane.smith@student.edu', 'F', 'P', 'AIML',
+        'B.E', '2023', '1', '9876543212', 'Mrs. Smith', '9876543213', 'Coimbatore'
+    ])
+    
+    return response
+
+
+def send_first_login_notification(student_data):
+    """
+    Send first-time login notification to student's college email.
+    The college email is auto-generated: <register_no>@student.annauniv.edu
+    """
+    try:
+        subject = 'Welcome to CSE Department ERP - First Time Login Instructions'
+        message = f"""
+Dear {student_data['name']},
+
+Your account has been created in the CSE Department ERP System.
+
+Register Number: {student_data['register_no']}
+Personal Email (for login): {student_data['email']}
+College Email: {student_data['college_email']}
+
+To set your password, please follow these steps:
+
+1. Visit the ERP portal and click on "First Time Login"
+2. Enter your 10-digit Register Number: {student_data['register_no']}
+3. An OTP will be sent to THIS college email ({student_data['college_email']})
+4. Enter the OTP to verify your identity
+5. Set your password
+
+After setting your password, you can login using:
+- Email: {student_data['email']}
+- Password: (the password you set)
+
+If you have any issues, please contact the CSE Department office.
+
+Regards,
+CSE Department
+College of Engineering Guindy
+Anna University
+        """
+        
+        send_mail(
+            subject,
+            message,
+            settings.EMAIL_HOST_USER,
+            [student_data['college_email']],
+            fail_silently=False,
+        )
+        return True
+    except Exception as e:
+        print(f"Email error for {student_data['register_no']}: {e}")
+        return False
+
+
+def send_password_setup_email(request, user):
+    """Send email to user to set up their password (legacy method)"""
+    try:
+        # Generate password reset token
+        token = default_token_generator.make_token(user)
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+        
+        # Build password reset URL
+        reset_url = request.build_absolute_uri(
+            reverse('password_reset_confirm', kwargs={'uidb64': uid, 'token': token})
+        )
+        
+        subject = 'Welcome to CSE Department ERP - Set Your Password'
+        message = f"""
+Dear {user.full_name},
+
+Your account has been created in the CSE Department ERP System.
+
+Email: {user.email}
+
+Please click the link below to set your password:
+{reset_url}
+
+This link will expire in 24 hours.
+
+If you did not request this, please ignore this email.
+
+Regards,
+CSE Department
+College of Engineering Guindy
+        """
+        
+        send_mail(
+            subject,
+            message,
+            settings.DEFAULT_FROM_EMAIL if hasattr(settings, 'DEFAULT_FROM_EMAIL') else 'noreply@cse.edu',
+            [user.email],
+            fail_silently=True,
+        )
+        return True
+    except Exception as e:
+        print(f"Email error: {e}")
+        return False
+
+
+@login_required
+def resend_password_email(request, student_id):
+    """Resend password setup email to a student"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Access Denied'}, status=403)
+    
+    try:
+        student = get_object_or_404(Student_Profile, id=student_id)
+        user = student.user
+        
+        if user.has_usable_password():
+            return JsonResponse({'error': 'User has already set their password'}, status=400)
+        
+        send_password_setup_email(request, user)
+        return JsonResponse({'success': True, 'message': f'Password setup email sent to {user.email}'})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=400)
+
+
+# =============================================================================
+# SEMESTER PROMOTION MANAGEMENT
+# =============================================================================
+
+from .models import SemesterPromotion, PromotionSchedule, check_and_promote_students, promote_students_manually, create_promotion_schedules_for_semester
+from datetime import timedelta
+from django.utils import timezone
+
+
+@login_required
+def manage_promotions(request):
+    """View and manage student semester promotions"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    # Get pending promotions
+    today = timezone.now().date()
+    pending_schedules = PromotionSchedule.objects.filter(
+        executed=False
+    ).select_related('semester', 'semester__academic_year').order_by('scheduled_date')
+    
+    # Get recent promotions
+    recent_promotions = SemesterPromotion.objects.select_related(
+        'student', 'student__user', 'academic_year', 'promoted_by'
+    ).order_by('-promoted_at')[:50]
+    
+    # Get students by semester for manual promotion
+    semesters = range(1, 9)  # Semesters 1-8
+    students_by_sem = {}
+    for sem in semesters:
+        students_by_sem[sem] = Student_Profile.objects.filter(
+            current_sem=sem, is_graduated=False
+        ).count()
+    
+    # Check for overdue promotions
+    overdue_count = pending_schedules.filter(scheduled_date__lt=today).count()
+    
+    context = {
+        'page_title': 'Semester Promotions',
+        'pending_schedules': pending_schedules,
+        'recent_promotions': recent_promotions,
+        'students_by_sem': students_by_sem,
+        'overdue_count': overdue_count,
+        'today': today,
+    }
+    
+    return render(request, 'hod_template/manage_promotions.html', context)
+
+
+@login_required
+@csrf_exempt
+def run_auto_promotion(request):
+    """Manually trigger the auto-promotion check"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Access Denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+    
+    results = check_and_promote_students(promoted_by=request.user)
+    
+    return JsonResponse({
+        'success': True,
+        'total_promoted': results['total_promoted'],
+        'semesters_processed': results['semesters_processed'],
+        'errors': results['errors']
+    })
+
+
+@login_required
+@csrf_exempt
+def manual_promote_students(request):
+    """Manually promote selected students"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Access Denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        student_ids = data.get('student_ids', [])
+        to_semester = int(data.get('to_semester', 0))
+        
+        if not student_ids:
+            return JsonResponse({'error': 'No students selected'}, status=400)
+        
+        if to_semester < 1 or to_semester > 8:
+            return JsonResponse({'error': 'Invalid target semester'}, status=400)
+        
+        students = Student_Profile.objects.filter(id__in=student_ids)
+        
+        # Get current academic year
+        academic_year = AcademicYear.objects.filter(is_active=True).first()
+        
+        results = promote_students_manually(
+            students=students,
+            to_semester=to_semester,
+            promoted_by=request.user,
+            academic_year=academic_year
+        )
+        
+        return JsonResponse({
+            'success': True,
+            'promoted': results['success'],
+            'errors': results['errors']
+        })
+        
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@login_required
+@csrf_exempt
+def create_promotion_schedule(request):
+    """Create a promotion schedule for a semester"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Access Denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Method not allowed'}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        semester_id = data.get('semester_id')
+        from_semester = int(data.get('from_semester', 0))
+        scheduled_date = data.get('scheduled_date')
+        
+        semester = get_object_or_404(Semester, id=semester_id)
+        
+        # Create or update schedule
+        schedule, created = PromotionSchedule.objects.update_or_create(
+            semester=semester,
+            target_semester_number=from_semester,
+            defaults={
+                'scheduled_date': scheduled_date,
+                'executed': False
+            }
+        )
+        
+        return JsonResponse({
+            'success': True,
+            'created': created,
+            'schedule_id': schedule.id
+        })
+        
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@login_required
+def get_students_for_promotion(request):
+    """Get list of students in a specific semester for promotion"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Access Denied'}, status=403)
+    
+    semester = request.GET.get('semester')
+    if not semester:
+        return JsonResponse({'error': 'Semester required'}, status=400)
+    
+    students = Student_Profile.objects.filter(
+        current_sem=int(semester),
+        is_graduated=False
+    ).select_related('user').order_by('register_no')
+    
+    data = [{
+        'id': s.id,
+        'name': s.user.get_full_name(),
+        'register_no': s.register_no,
+        'current_sem': s.current_sem,
+        'year_of_study': s.year_of_study,
+        'batch': s.batch_label
+    } for s in students]
+    
+    return JsonResponse({'students': data})

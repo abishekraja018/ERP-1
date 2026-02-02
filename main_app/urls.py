@@ -16,6 +16,12 @@ urlpatterns = [
     path("firebase-messaging-sw.js", views.showFirebaseJS, name='showFirebaseJS'),
     path("announcements/", views.announcements, name="announcements"),
     
+    # First-time student login with OTP
+    path("student/first-login/", views.student_first_login, name='student_first_login'),
+    path("student/send-otp/", views.send_student_otp, name='send_student_otp'),
+    path("student/verify-otp/", views.verify_student_otp, name='verify_student_otp'),
+    path("student/set-password/", views.student_set_password, name='student_set_password'),
+    
     # API endpoints
     path("get_attendance", views.get_attendance, name='get_attendance'),
     path("check_email_availability", hod_views.check_email_availability, name="check_email_availability"),
@@ -25,6 +31,7 @@ urlpatterns = [
     # ==========================================================================
     path("admin/home/", hod_views.admin_home, name='admin_home'),
     path("admin/profile/", hod_views.admin_view_profile, name='admin_view_profile'),
+    path("admin/toggle-view/", hod_views.toggle_hod_view_mode, name='toggle_hod_view_mode'),
     
     # Faculty Management
     path("faculty/add/", hod_views.add_faculty, name='add_faculty'),
@@ -43,6 +50,9 @@ urlpatterns = [
     path("student/manage/", hod_views.manage_student, name='manage_student'),
     path("student/edit/<int:student_id>/", hod_views.edit_student, name='edit_student'),
     path("student/delete/<int:student_id>/", hod_views.delete_student, name='delete_student'),
+    path("student/bulk-upload/", hod_views.bulk_upload_students, name='bulk_upload_students'),
+    path("student/download-template/", hod_views.download_student_template, name='download_student_template'),
+    path("student/resend-email/<int:student_id>/", hod_views.resend_password_email, name='resend_password_email'),
     
     # Course Management
     path("course/add/", hod_views.add_course, name='add_course'),
@@ -75,6 +85,12 @@ urlpatterns = [
     
     path("regulation/add/", hod_views.add_regulation, name='add_regulation'),
     path("regulation/manage/", hod_views.manage_regulation, name='manage_regulation'),
+    
+    # Program Management
+    path("program/add/", hod_views.add_program, name='add_program'),
+    path("program/manage/", hod_views.manage_programs, name='manage_programs'),
+    path("program/edit/<int:program_id>/", hod_views.edit_program, name='edit_program'),
+    path("program/delete/<int:program_id>/", hod_views.delete_program, name='delete_program'),
     
     # Leave Management (HOD)
     path("leave/view/", hod_views.view_leave_requests, name='view_leave_requests'),
@@ -123,6 +139,25 @@ urlpatterns = [
     path("question-paper/delete/<int:qp_id>/", hod_views.delete_qp_assignment, name='delete_qp_assignment'),
     path("question-paper/get-faculty/", hod_views.get_faculty_for_course, name='get_faculty_for_course'),
     
+    # Timetable Management (HOD)
+    path("timetable/manage/", hod_views.manage_timetables, name='manage_timetables'),
+    path("timetable/add/", hod_views.add_timetable, name='add_timetable'),
+    path("timetable/edit/<int:timetable_id>/", hod_views.edit_timetable, name='edit_timetable'),
+    path("timetable/view/<int:timetable_id>/", hod_views.view_timetable, name='view_timetable'),
+    path("timetable/delete/<int:timetable_id>/", hod_views.delete_timetable, name='delete_timetable'),
+    path("timetable/save-entry/", hod_views.save_timetable_entry, name='save_timetable_entry'),
+    path("timetable/delete-entry/", hod_views.delete_timetable_entry, name='delete_timetable_entry'),
+    path("timetable/time-slots/", hod_views.manage_time_slots, name='manage_time_slots'),
+    path("timetable/get-courses/", hod_views.get_courses_for_semester, name='get_courses_for_semester'),
+    path("timetable/get-faculty/", hod_views.get_all_faculty, name='get_all_faculty'),
+    
+    # Semester Promotion Management (HOD)
+    path("promotions/", hod_views.manage_promotions, name='manage_promotions'),
+    path("promotions/run-auto/", hod_views.run_auto_promotion, name='run_auto_promotion'),
+    path("promotions/manual/", hod_views.manual_promote_students, name='manual_promote_students'),
+    path("promotions/schedule/", hod_views.create_promotion_schedule, name='create_promotion_schedule'),
+    path("promotions/students/", hod_views.get_students_for_promotion, name='get_students_for_promotion'),
+    
     # ==========================================================================
     # FACULTY / STAFF ROUTES
     # ==========================================================================
@@ -158,6 +193,9 @@ urlpatterns = [
     path("staff/question-paper/submit/<int:qp_id>/", staff_views.staff_submit_question_paper, name='staff_submit_question_paper'),
     path("staff/question-paper/details/<int:qp_id>/", staff_views.staff_view_qp_details, name='staff_view_qp_details'),
     
+    # Timetable (Staff)
+    path("staff/timetable/", staff_views.staff_view_timetable, name='staff_view_timetable'),
+    
     # ==========================================================================
     # STUDENT ROUTES
     # ==========================================================================
@@ -187,4 +225,7 @@ urlpatterns = [
     # Notifications
     path("student/fcmtoken/", student_views.student_fcmtoken, name='student_fcmtoken'),
     path("student/view/notification/", student_views.student_view_notification, name="student_view_notification"),
+    
+    # Timetable (Student)
+    path("student/timetable/", student_views.student_view_timetable, name='student_view_timetable'),
 ]

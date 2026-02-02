@@ -1,7 +1,7 @@
 {% load static %}
 <aside class="main-sidebar sidebar-dark-info elevation-4">
-    <!-- HOD/ADMIN SIDEBAR -->
-    {% if request.user.role == 'HOD' %}
+    <!-- HOD/ADMIN SIDEBAR (shown when HOD is in admin mode or hasn't toggled yet) -->
+    {% if request.user.is_hod and request.session.hod_view_mode != 'faculty' %}
     <a href="{% url 'admin_home' %}" class="brand-link">
         <img src="{% static 'dist/img/virusx.png' %}" alt="LOGO" class="brand-image">
         <span class="brand-text font-weight-light">CSE DEPT Admin</span>
@@ -53,7 +53,7 @@
                 </li>
 
                 <!-- Student Management -->
-                <li class="nav-item has-treeview {% if 'student/add' in request.path or 'student/manage' in request.path or 'student/edit' in request.path %}menu-open{% endif %}">
+                <li class="nav-item has-treeview {% if 'student/add' in request.path or 'student/manage' in request.path or 'student/edit' in request.path or 'student/bulk-upload' in request.path %}menu-open{% endif %}">
                     <a href="#" class="nav-link">
                         <i class="nav-icon fas fa-user-graduate"></i>
                         <p>Students <i class="fas fa-angle-left right"></i></p>
@@ -63,6 +63,12 @@
                             <a href="{% url 'add_student' %}" class="nav-link {% if 'student/add' in request.path %}active{% endif %}">
                                 <i class="far fa-circle nav-icon"></i>
                                 <p>Add Student</p>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="{% url 'bulk_upload_students' %}" class="nav-link {% if 'student/bulk-upload' in request.path %}active{% endif %}">
+                                <i class="far fa-circle nav-icon"></i>
+                                <p>Bulk Upload</p>
                             </a>
                         </li>
                         <li class="nav-item">
@@ -161,6 +167,18 @@
                                 <p>Manage Regulations</p>
                             </a>
                         </li>
+                        <li class="nav-item">
+                            <a href="{% url 'add_program' %}" class="nav-link {% if 'program/add' in request.path %}active{% endif %}">
+                                <i class="far fa-circle nav-icon"></i>
+                                <p>Add Program</p>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="{% url 'manage_programs' %}" class="nav-link {% if 'program/manage' in request.path %}active{% endif %}">
+                                <i class="far fa-circle nav-icon"></i>
+                                <p>Manage Programs</p>
+                            </a>
+                        </li>
                     </ul>
                 </li>
 
@@ -246,6 +264,34 @@
                     </ul>
                 </li>
 
+                <!-- Timetable Management -->
+                <li class="nav-item has-treeview {% if 'timetable' in request.path %}menu-open{% endif %}">
+                    <a href="#" class="nav-link">
+                        <i class="nav-icon fas fa-calendar-alt"></i>
+                        <p>Timetable <i class="fas fa-angle-left right"></i></p>
+                    </a>
+                    <ul class="nav nav-treeview">
+                        <li class="nav-item">
+                            <a href="{% url 'add_timetable' %}" class="nav-link {% if 'timetable/add' in request.path %}active{% endif %}">
+                                <i class="far fa-circle nav-icon"></i>
+                                <p>Create Timetable</p>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="{% url 'manage_timetables' %}" class="nav-link {% if 'timetable/manage' in request.path %}active{% endif %}">
+                                <i class="far fa-circle nav-icon"></i>
+                                <p>Manage Timetables</p>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="{% url 'manage_time_slots' %}" class="nav-link {% if 'timetable/time-slots' in request.path %}active{% endif %}">
+                                <i class="far fa-circle nav-icon"></i>
+                                <p>Time Slots</p>
+                            </a>
+                        </li>
+                    </ul>
+                </li>
+
                 <!-- Lab Issues -->
                 <li class="nav-item">
                     <a href="{% url 'view_lab_issues' %}" class="nav-link {% if 'lab-issues' in request.path %}active{% endif %}">
@@ -293,11 +339,11 @@
         </nav>
     </div>
 
-    <!-- FACULTY/GUEST SIDEBAR -->
-    {% elif request.user.role == 'FACULTY' or request.user.role == 'GUEST' %}
+    <!-- FACULTY/GUEST SIDEBAR (also shown for HOD in faculty mode) -->
+    {% elif request.user.role == 'FACULTY' or request.user.role == 'GUEST' or request.session.hod_view_mode == 'faculty' %}
     <a href="{% url 'staff_home' %}" class="brand-link">
         <img src="{% static 'dist/img/virusx.png' %}" alt="LOGO" class="brand-image">
-        <span class="brand-text font-weight-light">CSE Faculty Panel</span>
+        <span class="brand-text font-weight-light">{% if request.user.is_hod %}HOD Faculty View{% else %}CSE Faculty Panel{% endif %}</span>
     </a>
     <div class="sidebar" style="background-image: linear-gradient(to right top, #0b3574, #033f91, #004aae, #0054cc, #125eeb);">
         <div class="user-panel mt-3 pb-3 mb-3 d-flex">
@@ -389,6 +435,14 @@
                     </a>
                 </li>
 
+                <!-- Timetable -->
+                <li class="nav-item">
+                    <a href="{% url 'staff_view_timetable' %}" class="nav-link {% if 'staff/timetable' in request.path %}active{% endif %}">
+                        <i class="nav-icon fas fa-calendar-alt"></i>
+                        <p>My Schedule</p>
+                    </a>
+                </li>
+
                 <!-- Leave -->
                 <li class="nav-item">
                     <a href="{% url 'staff_apply_leave' %}" class="nav-link {% if 'apply/leave' in request.path %}active{% endif %}">
@@ -459,6 +513,14 @@
                     <a href="{% url 'student_view_courses' %}" class="nav-link {% if 'student/courses' in request.path %}active{% endif %}">
                         <i class="nav-icon fas fa-book"></i>
                         <p>My Courses</p>
+                    </a>
+                </li>
+
+                <!-- Timetable -->
+                <li class="nav-item">
+                    <a href="{% url 'student_view_timetable' %}" class="nav-link {% if 'student/timetable' in request.path %}active{% endif %}">
+                        <i class="nav-icon fas fa-calendar-alt"></i>
+                        <p>My Timetable</p>
                     </a>
                 </li>
 
