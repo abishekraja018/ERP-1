@@ -7,3 +7,6 @@ whitenoise==5.2.0
 Pillow
 requests
 beautifulsoup4
+python-docx
+htmldocx
+beautifulsoup4

@@ -5,6 +5,25 @@
 {% block content %}
 <section class="content">
     <div class="container-fluid">
+        <!-- New Structured QP Option Banner -->
+        <div class="row mb-4">
+            <div class="col-lg-12">
+                <div class="alert alert-info alert-dismissible fade show">
+                    <button type="button" class="close" data-dismiss="alert">
+                        <span>&times;</span>
+                    </button>
+                    <h5><i class="fas fa-lightbulb"></i> New Feature: Create Structured Question Papers</h5>
+                    <p class="mb-2">Want to create a question paper with Anna University R2023 format automatically?</p>
+                    <a href="{% url 'staff_list_structured_qps' %}" class="btn btn-sm btn-info">
+                        <i class="fas fa-file-alt"></i> View My Structured QPs
+                    </a>
+                    <a href="{% url 'staff_create_structured_qp' %}" class="btn btn-sm btn-success">
+                        <i class="fas fa-plus"></i> Create New Structured QP
+                    </a>
+                </div>
+            </div>
+        </div>
+
         <!-- Statistics Cards -->
         <div class="row">
             <div class="col-lg-2 col-6">

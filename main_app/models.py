@@ -256,6 +256,11 @@ class Semester(models.Model):
         unique_together = ('academic_year', 'semester_number')
         ordering = ['-academic_year', 'semester_number']
     
+    @property
+    def semester_name(self):
+        """Returns formatted semester name"""
+        return f"Semester {self.semester_number}"
+    
     def __str__(self):
         return f"{self.academic_year} - Sem {self.semester_number}"
 
@@ -1334,3 +1339,139 @@ def get_student_attendance_percentage(student_profile, course_assignment=None):
     
     present = attendances.filter(status__in=['PRESENT', 'OD']).count()
     return round((present / total) * 100, 2)
+
+
+# =============================================================================
+# STRUCTURED QUESTION PAPER (Anna University R2023 Format)
+# =============================================================================
+
+class StructuredQuestionPaper(models.Model):
+    """Stores structured question paper metadata with CO descriptions"""
+    
+    STATUS_CHOICES = [
+        ('DRAFT', 'Draft'),
+        ('SUBMITTED', 'Submitted for Review'),
+        ('UNDER_REVIEW', 'Under Review'),
+        ('APPROVED', 'Approved'),
+        ('REJECTED', 'Rejected'),
+    ]
+    
+    qp_assignment = models.OneToOneField(
+        'QuestionPaperAssignment', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='structured_qp',
+        help_text='Optional link to question paper assignment'
+    )
+    
+    faculty = models.ForeignKey(Faculty_Profile, on_delete=models.CASCADE, related_name='structured_qps')
+    course = models.ForeignKey(Course, on_delete=models.CASCADE)
+    academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE)
+    semester = models.ForeignKey(Semester, on_delete=models.CASCADE)
+    regulation = models.ForeignKey(Regulation, on_delete=models.CASCADE)
+    
+    exam_month_year = models.CharField(
+        max_length=50,
+        help_text='e.g., NOV/DEC 2023',
+        verbose_name='Exam Month/Year'
+    )
+    
+    # Course Outcome Descriptions
+    co1_description = models.TextField(blank=True, verbose_name='CO1 Description')
+    co2_description = models.TextField(blank=True, verbose_name='CO2 Description')
+    co3_description = models.TextField(blank=True, verbose_name='CO3 Description')
+    co4_description = models.TextField(blank=True, verbose_name='CO4 Description')
+    co5_description = models.TextField(blank=True, verbose_name='CO5 Description')
+    
+    # Status & Review
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
+    hod_comments = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_qps')
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    
+    # Generated Document
+    generated_document = models.FileField(
+        upload_to='question_papers/structured/%Y/%m/',
+        null=True,
+        blank=True,
+        help_text='Auto-generated .docx file in R2023 format'
+    )
+    
+    class Meta:
+        db_table = 'main_app_structuredquestionpaper'
+        verbose_name = 'Structured Question Paper'
+        verbose_name_plural = 'Structured Question Papers'
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f'{self.course.course_code} - {self.exam_month_year} ({self.get_status_display()})'
+
+
+class QPQuestion(models.Model):
+    """Individual questions for structured question papers"""
+    
+    PART_CHOICES = [
+        ('A', 'Part A - Short Answer (2 marks)'),
+        ('B', 'Part B - Descriptive (13 marks)'),
+        ('C', 'Part C - Problem Solving (15 marks)'),
+    ]
+    
+    CO_CHOICES = [
+        ('CO1', 'CO1'),
+        ('CO2', 'CO2'),
+        ('CO3', 'CO3'),
+        ('CO4', 'CO4'),
+        ('CO5', 'CO5'),
+    ]
+    
+    BLOOM_CHOICES = [
+        ('L1', 'L1 - Remember'),
+        ('L2', 'L2 - Understand'),
+        ('L3', 'L3 - Apply'),
+        ('L4', 'L4 - Analyze'),
+        ('L5', 'L5 - Evaluate'),
+        ('L6', 'L6 - Create'),
+    ]
+    
+    question_paper = models.ForeignKey(StructuredQuestionPaper, on_delete=models.CASCADE, related_name='questions')
+    part = models.CharField(max_length=1, choices=PART_CHOICES)
+    question_number = models.IntegerField(help_text='Question number (1-16)')
+    
+    # OR options (for Part B)
+    is_or_option = models.BooleanField(default=False)
+    or_pair_number = models.IntegerField(null=True, blank=True, help_text='For Part B: 11, 12, 13, 14, 15')
+    option_label = models.CharField(max_length=5, blank=True, help_text='(a) or (b) for OR options')
+    
+    # Question text
+    question_text = models.TextField(help_text='Main question text')
+    
+    # Subdivisions (max 2 for Part B)
+    has_subdivisions = models.BooleanField(default=False)
+    subdivision_1_text = models.TextField(blank=True)
+    subdivision_1_marks = models.IntegerField(null=True, blank=True)
+    subdivision_2_text = models.TextField(blank=True)
+    subdivision_2_marks = models.IntegerField(null=True, blank=True)
+    
+    # Mapping
+    course_outcome = models.CharField(max_length=5, choices=CO_CHOICES)
+    bloom_level = models.CharField(max_length=5, choices=BLOOM_CHOICES)
+    marks = models.IntegerField()
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'main_app_qpquestion'
+        verbose_name = 'Question Paper Question'
+        verbose_name_plural = 'Question Paper Questions'
+        ordering = ['part', 'question_number', 'option_label']
+    
+    def __str__(self):
+        return f'Q{self.question_number}{self.option_label} - {self.question_text[:50]}'

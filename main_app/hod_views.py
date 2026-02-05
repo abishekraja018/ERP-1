@@ -1,4 +1,4 @@
-"""
+﻿"""
 Anna University CSE Department ERP System
 HOD (Head of Department) Views
 """
@@ -2445,3 +2445,234 @@ def get_students_for_promotion(request):
     } for s in students]
     
     return JsonResponse({'students': data})
+
+
+# =============================================================================
+# STRUCTURED QUESTION PAPER - HOD REVIEW
+# =============================================================================
+
+@login_required
+def hod_review_structured_qps(request):
+    """List all structured question papers for HOD review"""
+    from main_app.models import StructuredQuestionPaper
+    
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    hod = get_object_or_404(HOD_Profile, user=request.user)
+    
+    # Get all QPs for HOD's department courses
+    qps = StructuredQuestionPaper.objects.filter(
+        course__department=hod.department
+    ).select_related(
+        'faculty__user', 'course', 'academic_year', 'semester', 'regulation'
+    ).order_by('-submitted_at', '-created_at')
+    
+    # Filter by status if provided
+    status_filter = request.GET.get('status')
+    if status_filter:
+        qps = qps.filter(status=status_filter)
+    
+    context = {
+        'qps': qps,
+        'status_filter': status_filter,
+        'page_title': 'Review Structured Question Papers'
+    }
+    return render(request, "hod_template/review_structured_qps.html", context)
+
+
+@login_required
+def hod_review_structured_qp_detail(request, qp_id):
+    """Detailed review of a structured question paper"""
+    from main_app.models import StructuredQuestionPaper
+    
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    hod = get_object_or_404(HOD_Profile, user=request.user)
+    qp = get_object_or_404(
+        StructuredQuestionPaper, 
+        id=qp_id, 
+        course__department=hod.department
+    )
+    
+    # Update status if viewing for first time
+    if qp.status == 'SUBMITTED':
+        qp.status = 'UNDER_REVIEW'
+        qp.save()
+    
+    # Calculate distribution and validation
+    distribution = qp.calculate_marks_distribution()
+    validation_errors = qp.validate_distribution()
+    
+    # Get questions by part
+    part_a_questions = qp.get_part_a_questions()
+    part_b_questions = qp.get_part_b_questions()
+    part_c_questions = qp.get_part_c_questions()
+    
+    # Group Part B by OR pairs
+    part_b_pairs = {}
+    for q in part_b_questions:
+        if q.or_pair_number not in part_b_pairs:
+            part_b_pairs[q.or_pair_number] = []
+        part_b_pairs[q.or_pair_number].append(q)
+    
+    context = {
+        'qp': qp,
+        'part_a_questions': part_a_questions,
+        'part_b_pairs': sorted(part_b_pairs.items()),
+        'part_c_questions': part_c_questions,
+        'distribution': distribution,
+        'validation_errors': validation_errors,
+        'can_approve': len(validation_errors) == 0,
+        'page_title': f'Review QP - {qp.course.course_code}'
+    }
+    return render(request, "hod_template/review_structured_qp_detail.html", context)
+
+
+@login_required
+def hod_approve_structured_qp(request, qp_id):
+    """Approve a structured question paper"""
+    from main_app.models import StructuredQuestionPaper
+    from django.utils import timezone
+    
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    hod = get_object_or_404(HOD_Profile, user=request.user)
+    qp = get_object_or_404(
+        StructuredQuestionPaper, 
+        id=qp_id, 
+        course__department=hod.department
+    )
+    
+    # Validate can approve
+    if qp.status == 'APPROVED':
+        messages.warning(request, "Question paper already approved.")
+        return redirect('hod_review_structured_qp_detail', qp_id=qp.id)
+    
+    # Check validation
+    validation_errors = qp.validate_distribution()
+    if validation_errors:
+        messages.error(request, "Cannot approve: " + "; ".join(validation_errors))
+        return redirect('hod_review_structured_qp_detail', qp_id=qp.id)
+    
+    if request.method == 'POST':
+        comments = request.POST.get('hod_comments', '')
+        
+        qp.status = 'APPROVED'
+        qp.hod_comments = comments
+        qp.reviewed_by = hod.user
+        qp.reviewed_at = timezone.now()
+        qp.save()
+        
+        # Update assignment if linked
+        if qp.qp_assignment:
+            qp.qp_assignment.status = 'APPROVED'
+            qp.qp_assignment.hod_comments = comments
+            qp.qp_assignment.reviewed_at = timezone.now()
+            qp.qp_assignment.save()
+        
+        # Notify faculty
+        Notification.objects.create(
+            user=qp.faculty.user,
+            title='Question Paper Approved',
+            message=f'Your structured question paper for {qp.course.course_code} has been approved by HOD',
+            notification_type='QP_APPROVAL'
+        )
+        
+        messages.success(request, f"Question paper for {qp.course.course_code} approved successfully!")
+        return redirect('hod_review_structured_qps')
+    
+    context = {
+        'qp': qp,
+        'page_title': f'Approve QP - {qp.course.course_code}'
+    }
+    return render(request, "hod_template/approve_structured_qp.html", context)
+
+
+@login_required
+def hod_reject_structured_qp(request, qp_id):
+    """Reject a structured question paper with feedback"""
+    from main_app.models import StructuredQuestionPaper
+    from django.utils import timezone
+    
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    hod = get_object_or_404(HOD_Profile, user=request.user)
+    qp = get_object_or_404(
+        StructuredQuestionPaper, 
+        id=qp_id, 
+        course__department=hod.department
+    )
+    
+    if qp.status == 'APPROVED':
+        messages.error(request, "Cannot reject an approved question paper.")
+        return redirect('hod_review_structured_qp_detail', qp_id=qp.id)
+    
+    if request.method == 'POST':
+        rejection_reason = request.POST.get('rejection_reason', '')
+        
+        if not rejection_reason:
+            messages.error(request, "Rejection reason is required.")
+            return redirect('hod_review_structured_qp_detail', qp_id=qp.id)
+        
+        qp.status = 'REJECTED'
+        qp.hod_comments = rejection_reason
+        qp.reviewed_by = hod.user
+        qp.reviewed_at = timezone.now()
+        qp.save()
+        
+        # Update assignment if linked
+        if qp.qp_assignment:
+            qp.qp_assignment.status = 'REJECTED'
+            qp.qp_assignment.hod_comments = rejection_reason
+            qp.qp_assignment.reviewed_at = timezone.now()
+            qp.qp_assignment.save()
+        
+        # Notify faculty
+        Notification.objects.create(
+            user=qp.faculty.user,
+            title='Question Paper Rejected',
+            message=f'Your structured question paper for {qp.course.course_code} requires revision. Reason: {rejection_reason[:100]}',
+            notification_type='QP_REJECTION'
+        )
+        
+        messages.warning(request, f"Question paper rejected. Faculty has been notified.")
+        return redirect('hod_review_structured_qps')
+    
+    context = {
+        'qp': qp,
+        'page_title': f'Reject QP - {qp.course.course_code}'
+    }
+    return render(request, "hod_template/reject_structured_qp.html", context)
+
+
+@login_required
+def hod_download_structured_qp(request, qp_id):
+    """Download structured question paper document"""
+    from main_app.models import StructuredQuestionPaper
+    from django.http import FileResponse, Http404
+    
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    hod = get_object_or_404(HOD_Profile, user=request.user)
+    qp = get_object_or_404(
+        StructuredQuestionPaper, 
+        id=qp_id, 
+        course__department=hod.department
+    )
+    
+    if not qp.generated_document:
+        raise Http404("Document not generated yet")
+    
+    response = FileResponse(qp.generated_document.open('rb'), content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    response['Content-Disposition'] = f'attachment; filename="{qp.generated_document.name.split("/")[-1]}"'
+    return response

@@ -14,7 +14,8 @@ from .models import (
     Publication, Student_Achievement, Lab_Issue_Log,
     LeaveRequest, Feedback, Event, EventRegistration,
     Notification, Announcement, QuestionPaperAssignment,
-    Timetable, TimetableEntry, TimeSlot
+    Timetable, TimetableEntry, TimeSlot,
+    StructuredQuestionPaper, QPQuestion
 )
 
 
@@ -693,3 +694,42 @@ class TimeSlotForm(FormSettings):
             'start_time': forms.TimeInput(attrs={'type': 'time'}),
             'end_time': forms.TimeInput(attrs={'type': 'time'}),
         }
+
+
+# =============================================================================
+
+# Forms restored - need multi-field implementation
+
+# =============================================================================
+# STRUCTURED QUESTION PAPER FORMS (Multi-field version)
+# =============================================================================
+
+from django.forms import inlineformset_factory
+
+class StructuredQuestionPaperForm(FormSettings):
+    class Meta:
+        model = StructuredQuestionPaper
+        fields = ["course", "academic_year", "semester", "regulation", "exam_month_year", 
+                  "co1_description", "co2_description", "co3_description", "co4_description", "co5_description"]
+        widgets = {
+            "exam_month_year": TextInput(attrs={"placeholder": "e.g., NOV/DEC 2023"}),
+            "co1_description": forms.Textarea(attrs={"rows": 2}),
+            "co2_description": forms.Textarea(attrs={"rows": 2}),
+            "co3_description": forms.Textarea(attrs={"rows": 2}),
+            "co4_description": forms.Textarea(attrs={"rows": 2}),
+            "co5_description": forms.Textarea(attrs={"rows": 2}),
+        }
+
+class QPQuestionForm(forms.ModelForm):
+    class Meta:
+        model = QPQuestion
+        fields = ["question_text", "has_subdivisions", "subdivision_1_text", "subdivision_1_marks",
+                  "subdivision_2_text", "subdivision_2_marks", "course_outcome", "bloom_level"]
+
+PartAFormSet = inlineformset_factory(StructuredQuestionPaper, QPQuestion, form=QPQuestionForm,
+    extra=10, max_num=10, can_delete=False, fields=["question_text", "course_outcome", "bloom_level"])
+PartBFormSet = inlineformset_factory(StructuredQuestionPaper, QPQuestion, form=QPQuestionForm,
+    extra=10, max_num=10, can_delete=False, fields=["question_text", "has_subdivisions", "subdivision_1_text",
+    "subdivision_1_marks", "subdivision_2_text", "subdivision_2_marks", "course_outcome", "bloom_level"])
+PartCFormSet = inlineformset_factory(StructuredQuestionPaper, QPQuestion, form=QPQuestionForm,
+    extra=1, max_num=1, can_delete=False, fields=["question_text", "course_outcome", "bloom_level"])

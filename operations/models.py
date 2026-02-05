@@ -421,3 +421,202 @@ def promote_students_manually(students, to_semester, promoted_by, academic_year=
                 })
     
     return results
+
+
+# =============================================================================
+# STRUCTURED QUESTION PAPER (R2023 Format)
+# =============================================================================
+
+class StructuredQuestionPaper(models.Model):
+    """Question Paper with structured web-based entry (Anna University R2023 Format)"""
+    
+    STATUS_CHOICES = [
+        ('DRAFT', 'Draft'),
+        ('SUBMITTED', 'Submitted for Review'),
+        ('UNDER_REVIEW', 'Under Review'),
+        ('APPROVED', 'Approved'),
+        ('REJECTED', 'Rejected'),
+        ('REVISION_REQUIRED', 'Revision Required'),
+    ]
+    
+    BLOOM_LEVEL_CHOICES = [
+        ('L1', 'L1 - Remembering'),
+        ('L2', 'L2 - Understanding'),
+        ('L3', 'L3 - Applying'),
+        ('L4', 'L4 - Analysing'),
+        ('L5', 'L5 - Evaluating'),
+        ('L6', 'L6 - Creating'),
+    ]
+    
+    # Assignment link
+    qp_assignment = models.OneToOneField('QuestionPaperAssignment', on_delete=models.CASCADE,
+                                          related_name='structured_qp', null=True, blank=True)
+    
+    # Basic Info
+    course = models.ForeignKey(Course, on_delete=models.CASCADE)
+    faculty = models.ForeignKey(Faculty_Profile, on_delete=models.CASCADE)
+    academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE)
+    semester = models.ForeignKey(Semester, on_delete=models.CASCADE)
+    regulation = models.ForeignKey(Regulation, on_delete=models.CASCADE)
+    exam_month_year = models.CharField(max_length=50, help_text='e.g., APR/MAY 2024')
+    
+    # Course Outcomes descriptions
+    co1_description = models.TextField(blank=True, null=True)
+    co2_description = models.TextField(blank=True, null=True)
+    co3_description = models.TextField(blank=True, null=True)
+    co4_description = models.TextField(blank=True, null=True)
+    co5_description = models.TextField(blank=True, null=True)
+    
+    # Checklist
+    tables_charts_permitted = models.TextField(blank=True, null=True,
+                                                help_text='List of tables/charts permitted')
+    
+    # Status and workflow
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
+    generated_document = models.FileField(upload_to='question_papers/structured/', blank=True, null=True)
+    
+    # Review
+    reviewed_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, blank=True,
+                                     related_name='reviewed_structured_qps')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_comments = models.TextField(blank=True, null=True)
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    
+    class Meta:
+        db_table = 'structured_question_paper'
+        ordering = ['-created_at']
+        verbose_name = 'Structured Question Paper'
+        verbose_name_plural = 'Structured Question Papers'
+    
+    def __str__(self):
+        return f"{self.course.course_code} - {self.exam_month_year} ({self.faculty.user.full_name})"
+    
+    def get_part_a_questions(self):
+        return self.questions.filter(part='A').order_by('question_number')
+    
+    def get_part_b_questions(self):
+        return self.questions.filter(part='B').order_by('question_number')
+    
+    def get_part_c_questions(self):
+        return self.questions.filter(part='C').order_by('question_number')
+    
+    def calculate_marks_distribution(self):
+        """Calculate CO and BL distribution for validation"""
+        questions = self.questions.all()
+        
+        co_distribution = {f'CO{i}': 0 for i in range(1, 6)}
+        bl_distribution = {f'L{i}': 0 for i in range(1, 7)}
+        
+        for q in questions:
+            if q.course_outcome:
+                co_distribution[q.course_outcome] = co_distribution.get(q.course_outcome, 0) + q.marks
+            if q.bloom_level:
+                bl_distribution[q.bloom_level] = bl_distribution.get(q.bloom_level, 0) + q.marks
+        
+        # Calculate BL percentages
+        total_marks = sum(bl_distribution.values())
+        if total_marks > 0:
+            lower_order = (bl_distribution['L1'] + bl_distribution['L2']) / total_marks * 100
+            intermediate = (bl_distribution['L3'] + bl_distribution['L4']) / total_marks * 100
+            higher_order = (bl_distribution['L5'] + bl_distribution['L6']) / total_marks * 100
+        else:
+            lower_order = intermediate = higher_order = 0
+        
+        return {
+            'co_distribution': co_distribution,
+            'bl_distribution': bl_distribution,
+            'lower_order_pct': round(lower_order, 2),
+            'intermediate_pct': round(intermediate, 2),
+            'higher_order_pct': round(higher_order, 2),
+        }
+    
+    def validate_distribution(self):
+        """Validate UG mark distribution (20-35% lower, min 40% intermediate, 15-25% higher)"""
+        dist = self.calculate_marks_distribution()
+        errors = []
+        
+        if dist['lower_order_pct'] < 20 or dist['lower_order_pct'] > 35:
+            errors.append(f"Lower order (L1+L2) should be 20-35%, currently {dist['lower_order_pct']}%")
+        
+        if dist['intermediate_pct'] < 40:
+            errors.append(f"Intermediate (L3+L4) should be minimum 40%, currently {dist['intermediate_pct']}%")
+        
+        if dist['higher_order_pct'] < 15 or dist['higher_order_pct'] > 25:
+            errors.append(f"Higher order (L5+L6) should be 15-25%, currently {dist['higher_order_pct']}%")
+        
+        return errors
+
+
+class QPQuestion(models.Model):
+    """Individual question in a structured question paper"""
+    
+    PART_CHOICES = [
+        ('A', 'Part A'),
+        ('B', 'Part B'),
+        ('C', 'Part C'),
+    ]
+    
+    COURSE_OUTCOME_CHOICES = [
+        ('CO1', 'CO1'),
+        ('CO2', 'CO2'),
+        ('CO3', 'CO3'),
+        ('CO4', 'CO4'),
+        ('CO5', 'CO5'),
+    ]
+    
+    BLOOM_LEVEL_CHOICES = [
+        ('L1', 'L1 - Remembering'),
+        ('L2', 'L2 - Understanding'),
+        ('L3', 'L3 - Applying'),
+        ('L4', 'L4 - Analysing'),
+        ('L5', 'L5 - Evaluating'),
+        ('L6', 'L6 - Creating'),
+    ]
+    
+    question_paper = models.ForeignKey(StructuredQuestionPaper, on_delete=models.CASCADE,
+                                        related_name='questions')
+    part = models.CharField(max_length=1, choices=PART_CHOICES)
+    question_number = models.IntegerField(help_text='e.g., 1, 2, 11, 12')
+    
+    # For Part B - OR questions
+    is_or_option = models.BooleanField(default=False, help_text='Is this an OR option? (Part B only)')
+    or_pair_number = models.IntegerField(null=True, blank=True, 
+                                          help_text='e.g., 11 for Q11(a) or Q11(b)')
+    option_label = models.CharField(max_length=5, blank=True, null=True, 
+                                     help_text='e.g., (a) or (b) for OR options')
+    
+    # Question content
+    question_text = models.TextField()
+    
+    # Subdivisions (for Part B)
+    has_subdivisions = models.BooleanField(default=False)
+    subdivision_i = models.TextField(blank=True, null=True, help_text='Subdivision (i)')
+    subdivision_ii = models.TextField(blank=True, null=True, help_text='Subdivision (ii)')
+    
+    # Marks
+    marks = models.IntegerField()
+    
+    # CO and BL mapping
+    course_outcome = models.CharField(max_length=3, choices=COURSE_OUTCOME_CHOICES)
+    bloom_level = models.CharField(max_length=2, choices=BLOOM_LEVEL_CHOICES)
+    
+    class Meta:
+        db_table = 'qp_question'
+        ordering = ['part', 'question_number', 'is_or_option']
+        verbose_name = 'Question'
+        verbose_name_plural = 'Questions'
+    
+    def __str__(self):
+        if self.part == 'B' and self.option_label:
+            return f"Q{self.or_pair_number}{self.option_label}"
+        return f"Q{self.question_number}"
+    
+    def get_full_question_number(self):
+        """Get formatted question number like '11 (a)' for Part B OR questions"""
+        if self.part == 'B' and self.option_label:
+            return f"{self.or_pair_number} {self.option_label}"
+        return str(self.question_number)

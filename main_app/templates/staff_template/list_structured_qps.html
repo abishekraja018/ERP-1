@@ -1,0 +1,118 @@
+{% extends 'main_app/base.html' %}
+{% load static %}
+
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+
+{% block content %}
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header bg-gradient-primary">
+                        <h3 class="card-title">
+                            <i class="fas fa-list"></i> My Structured Question Papers
+                        </h3>
+                        <div class="card-tools">
+                            <a href="{% url 'staff_create_structured_qp' %}" class="btn btn-success btn-sm">
+                                <i class="fas fa-plus"></i> Create New QP
+                            </a>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        {% if qps %}
+                        <div class="table-responsive">
+                            <table class="table table-bordered table-striped" id="qpTable">
+                                <thead class="bg-light">
+                                    <tr>
+                                        <th>#</th>
+                                        <th>Course</th>
+                                        <th>Regulation</th>
+                                        <th>Semester</th>
+                                        <th>Exam</th>
+                                        <th>Status</th>
+                                        <th>Created</th>
+                                        <th>Submitted</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for qp in qps %}
+                                    <tr>
+                                        <td>{{ forloop.counter }}</td>
+                                        <td>
+                                            <strong>{{ qp.course.course_code }}</strong><br>
+                                            <small class="text-muted">{{ qp.course.course_name }}</small>
+                                        </td>
+                                        <td>{{ qp.regulation.regulation_name }}</td>
+                                        <td>{{ qp.semester.semester_name }}</td>
+                                        <td>{{ qp.exam_month_year }}</td>
+                                        <td>
+                                            <span class="badge badge-{{ qp.status|lower }}">
+                                                {{ qp.get_status_display }}
+                                            </span>
+                                        </td>
+                                        <td>{{ qp.created_at|date:"d M Y" }}</td>
+                                        <td>
+                                            {% if qp.submitted_at %}
+                                            {{ qp.submitted_at|date:"d M Y" }}
+                                            {% else %}
+                                            <span class="text-muted">-</span>
+                                            {% endif %}
+                                        </td>
+                                        <td>
+                                            <div class="btn-group btn-group-sm">
+                                                <a href="{% url 'staff_preview_structured_qp' qp.id %}" 
+                                                   class="btn btn-info" title="Preview">
+                                                    <i class="fas fa-eye"></i>
+                                                </a>
+                                                {% if qp.status == 'DRAFT' %}
+                                                <a href="{% url 'staff_edit_structured_qp' qp.id %}" 
+                                                   class="btn btn-warning" title="Edit">
+                                                    <i class="fas fa-edit"></i>
+                                                </a>
+                                                {% endif %}
+                                                {% if qp.generated_document %}
+                                                <a href="{% url 'staff_download_structured_qp' qp.id %}" 
+                                                   class="btn btn-success" title="Download">
+                                                    <i class="fas fa-download"></i>
+                                                </a>
+                                                {% endif %}
+                                            </div>
+                                        </td>
+                                    </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        {% else %}
+                        <div class="alert alert-info">
+                            <i class="fas fa-info-circle"></i>
+                            No structured question papers created yet.
+                            <a href="{% url 'staff_create_structured_qp' %}" class="alert-link">Create your first one!</a>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<style>
+.badge-draft { background-color: #6c757d; }
+.badge-submitted { background-color: #17a2b8; }
+.badge-under_review { background-color: #ffc107; color: #000; }
+.badge-approved { background-color: #28a745; }
+.badge-rejected { background-color: #dc3545; }
+</style>
+
+<script>
+$(document).ready(function() {
+    $('#qpTable').DataTable({
+        "order": [[6, "desc"]],
+        "pageLength": 25
+    });
+});
+</script>
+{% endblock content %}

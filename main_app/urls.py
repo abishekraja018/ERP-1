@@ -106,6 +106,13 @@ urlpatterns = [
     path("publications/verify/", hod_views.verify_publications, name='verify_publications'),
     path("publications/approve/<int:publication_id>/", hod_views.approve_publication, name='approve_publication'),
     
+    # Structured Question Paper Review (HOD)
+    path("admin/structured-qp/review/", hod_views.hod_review_structured_qps, name='hod_review_structured_qps'),
+    path("admin/structured-qp/review/<int:qp_id>/", hod_views.hod_review_structured_qp_detail, name='hod_review_structured_qp_detail'),
+    path("admin/structured-qp/approve/<int:qp_id>/", hod_views.hod_approve_structured_qp, name='hod_approve_structured_qp'),
+    path("admin/structured-qp/reject/<int:qp_id>/", hod_views.hod_reject_structured_qp, name='hod_reject_structured_qp'),
+    path("admin/structured-qp/download/<int:qp_id>/", hod_views.hod_download_structured_qp, name='hod_download_structured_qp'),
+    
     # Lab Issues
     path("lab-issues/", hod_views.view_lab_issues, name='view_lab_issues'),
     
@@ -192,6 +199,15 @@ urlpatterns = [
     path("staff/question-paper/", staff_views.staff_view_qp_assignments, name='staff_view_qp_assignments'),
     path("staff/question-paper/submit/<int:qp_id>/", staff_views.staff_submit_question_paper, name='staff_submit_question_paper'),
     path("staff/question-paper/details/<int:qp_id>/", staff_views.staff_view_qp_details, name='staff_view_qp_details'),
+    
+    # Structured Question Paper (Staff) - R2023 Format
+    path("staff/structured-qp/list/", staff_views.staff_list_structured_qps, name='staff_list_structured_qps'),
+    path("staff/structured-qp/create/", staff_views.staff_create_structured_qp, name='staff_create_structured_qp'),
+    path("staff/structured-qp/create/<int:assignment_id>/", staff_views.staff_create_structured_qp, name='staff_create_structured_qp_from_assignment'),
+    path("staff/structured-qp/edit/<int:qp_id>/", staff_views.staff_edit_structured_qp, name='staff_edit_structured_qp'),
+    path("staff/structured-qp/preview/<int:qp_id>/", staff_views.staff_preview_structured_qp, name='staff_preview_structured_qp'),
+    path("staff/structured-qp/submit/<int:qp_id>/", staff_views.staff_submit_structured_qp, name='staff_submit_structured_qp'),
+    path("staff/structured-qp/download/<int:qp_id>/", staff_views.staff_download_structured_qp, name='staff_download_structured_qp'),
     
     # Timetable (Staff)
     path("staff/timetable/", staff_views.staff_view_timetable, name='staff_view_timetable'),
