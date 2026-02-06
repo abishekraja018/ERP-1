@@ -557,6 +557,11 @@ class Semester(models.Model):
         verbose_name = 'Semester'
         verbose_name_plural = 'Semesters'
     
+    @property
+    def semester_name(self):
+        """Returns formatted semester name"""
+        return f"Semester {self.semester_number}"
+    
     def __str__(self):
         return f"{self.academic_year} - Sem {self.semester_number} ({self.year_of_study_display})"
     
@@ -2105,3 +2110,405 @@ def get_student_attendance_percentage(student_profile, course_assignment=None):
     
     present = attendances.filter(status__in=['PRESENT', 'OD']).count()
     return round((present / total) * 100, 2)
+
+
+# =============================================================================
+# EXAM SCHEDULE FOR QUESTION PAPERS
+# =============================================================================
+
+class ExamSchedule(models.Model):
+    """
+    Exam scheduling for question papers.
+    HOD sets exam date/time, editable until exam ends.
+    QP and answers are released to students after exam ends.
+    """
+    
+    STATUS_CHOICES = [
+        ('SCHEDULED', 'Scheduled'),
+        ('ONGOING', 'Exam Ongoing'),
+        ('COMPLETED', 'Completed'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    
+    structured_qp = models.OneToOneField(
+        'StructuredQuestionPaper',
+        on_delete=models.CASCADE,
+        related_name='exam_schedule',
+        help_text='The approved question paper for this exam'
+    )
+    
+    # Exam timing
+    exam_date = models.DateField(verbose_name='Exam Date')
+    start_time = models.TimeField(verbose_name='Start Time')
+    end_time = models.TimeField(verbose_name='End Time')
+    duration_minutes = models.IntegerField(
+        default=180,
+        validators=[MinValueValidator(30), MaxValueValidator(300)],
+        verbose_name='Duration (minutes)'
+    )
+    
+    # Venue info
+    venue = models.CharField(max_length=200, blank=True, null=True, verbose_name='Exam Venue')
+    
+    # Target audience - which students can see this
+    batch_labels = models.CharField(
+        max_length=20,
+        default='N,P,Q',
+        help_text='Comma-separated batch labels (e.g., "N,P,Q")'
+    )
+    semester = models.ForeignKey('Semester', on_delete=models.CASCADE, null=True, blank=True)
+    
+    # Status
+    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='SCHEDULED')
+    
+    # Release control
+    release_qp_after_exam = models.BooleanField(
+        default=True,
+        verbose_name='Release QP to students after exam',
+        help_text='If checked, students can view QP after exam ends'
+    )
+    release_answers_after_exam = models.BooleanField(
+        default=True,
+        verbose_name='Release answers to students after exam',
+        help_text='If checked, students can view answer key after exam ends'
+    )
+    
+    # Metadata
+    scheduled_by = models.ForeignKey(
+        Account_User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='scheduled_exams'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'main_app_examschedule'
+        verbose_name = 'Exam Schedule'
+        verbose_name_plural = 'Exam Schedules'
+        ordering = ['-exam_date', '-start_time']
+    
+    def __str__(self):
+        return f"{self.structured_qp.course.course_code} - {self.exam_date} ({self.get_status_display()})"
+    
+    @property
+    def exam_datetime(self):
+        """Returns combined datetime for exam start"""
+        from datetime import datetime as dt
+        return dt.combine(self.exam_date, self.start_time)
+    
+    @property
+    def exam_end_datetime(self):
+        """Returns combined datetime for exam end"""
+        from datetime import datetime as dt
+        return dt.combine(self.exam_date, self.end_time)
+    
+    @property
+    def is_exam_started(self):
+        """Check if exam has started"""
+        from django.utils import timezone
+        now = timezone.now()
+        exam_start = timezone.make_aware(self.exam_datetime) if timezone.is_naive(self.exam_datetime) else self.exam_datetime
+        return now >= exam_start
+    
+    @property
+    def is_exam_ended(self):
+        """Check if exam has ended"""
+        from django.utils import timezone
+        now = timezone.now()
+        exam_end = timezone.make_aware(self.exam_end_datetime) if timezone.is_naive(self.exam_end_datetime) else self.exam_end_datetime
+        return now > exam_end
+    
+    @property
+    def is_editable(self):
+        """Schedule is editable until exam ends"""
+        return not self.is_exam_ended
+    
+    @property
+    def is_qp_released(self):
+        """Check if QP should be visible to students"""
+        return self.is_exam_ended and self.release_qp_after_exam and self.status == 'COMPLETED'
+    
+    @property
+    def is_answers_released(self):
+        """Check if answers should be visible to students"""
+        return self.is_exam_ended and self.release_answers_after_exam and self.status == 'COMPLETED'
+    
+    def update_status(self):
+        """Auto-update status based on time"""
+        if self.status == 'CANCELLED':
+            return
+        
+        if self.is_exam_ended:
+            self.status = 'COMPLETED'
+        elif self.is_exam_started:
+            self.status = 'ONGOING'
+        else:
+            self.status = 'SCHEDULED'
+        self.save(update_fields=['status'])
+    
+    def get_batch_labels_list(self):
+        """Return batch labels as a list"""
+        return [label.strip() for label in self.batch_labels.split(',') if label.strip()]
+
+
+# =============================================================================
+# STRUCTURED QUESTION PAPER (Anna University R2023 Format)
+# =============================================================================
+
+class StructuredQuestionPaper(models.Model):
+    """Stores structured question paper metadata with CO descriptions"""
+    
+    STATUS_CHOICES = [
+        ('DRAFT', 'Draft'),
+        ('SUBMITTED', 'Submitted for Review'),
+        ('UNDER_REVIEW', 'Under Review'),
+        ('APPROVED', 'Approved'),
+        ('REJECTED', 'Rejected'),
+    ]
+    
+    qp_assignment = models.OneToOneField(
+        'QuestionPaperAssignment', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='structured_qp',
+        help_text='Optional link to question paper assignment'
+    )
+    
+    faculty = models.ForeignKey(Faculty_Profile, on_delete=models.CASCADE, related_name='structured_qps')
+    course = models.ForeignKey(Course, on_delete=models.CASCADE)
+    academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE)
+    semester = models.ForeignKey(Semester, on_delete=models.CASCADE)
+    regulation = models.ForeignKey(Regulation, on_delete=models.CASCADE)
+    
+    exam_month_year = models.CharField(
+        max_length=50,
+        help_text='e.g., NOV/DEC 2023',
+        verbose_name='Exam Month/Year'
+    )
+    
+    # Course Outcome Descriptions
+    co1_description = models.TextField(blank=True, verbose_name='CO1 Description')
+    co2_description = models.TextField(blank=True, verbose_name='CO2 Description')
+    co3_description = models.TextField(blank=True, verbose_name='CO3 Description')
+    co4_description = models.TextField(blank=True, verbose_name='CO4 Description')
+    co5_description = models.TextField(blank=True, verbose_name='CO5 Description')
+    
+    # Status & Review
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT')
+    hod_comments = models.TextField(blank=True)
+    reviewed_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_qps')
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    
+    # Generated Document
+    generated_document = models.FileField(
+        upload_to='question_papers/structured/%Y/%m/',
+        null=True,
+        blank=True,
+        help_text='Auto-generated .docx file in R2023 format'
+    )
+    
+    # Uploaded Document (for direct uploads)
+    uploaded_document = models.FileField(
+        upload_to='question_papers/uploads/%Y/%m/',
+        null=True,
+        blank=True,
+        help_text='Directly uploaded question paper document'
+    )
+    
+    # Flag to indicate if this is an uploaded QP vs structured
+    is_uploaded = models.BooleanField(default=False, help_text='True if QP was uploaded directly instead of created through structured form')
+    
+    class Meta:
+        db_table = 'main_app_structuredquestionpaper'
+        verbose_name = 'Structured Question Paper'
+        verbose_name_plural = 'Structured Question Papers'
+        ordering = ['-created_at']
+    
+    def __str__(self):
+        return f'{self.course.course_code} - {self.exam_month_year} ({self.get_status_display()})'
+    
+    def get_part_a_questions(self):
+        """Get all Part A questions ordered by question number"""
+        return self.questions.filter(part='A').order_by('question_number')
+    
+    def get_part_b_questions(self):
+        """Get all Part B questions ordered by OR pair and option"""
+        return self.questions.filter(part='B').order_by('or_pair_number', 'option_label')
+    
+    def get_part_c_questions(self):
+        """Get all Part C questions"""
+        return self.questions.filter(part='C').order_by('question_number')
+    
+    def calculate_marks_distribution(self):
+        """Calculate marks distribution by CO and Bloom's level"""
+        by_co = {'CO1': 0, 'CO2': 0, 'CO3': 0, 'CO4': 0, 'CO5': 0}
+        by_bloom = {'L1': 0, 'L2': 0, 'L3': 0, 'L4': 0, 'L5': 0, 'L6': 0}
+        total_marks = 0
+        part_a_count = 0
+        part_b_count = 0
+        part_c_count = 0
+        
+        # Part A: 10 questions × 2 marks = 20 marks
+        for q in self.get_part_a_questions():
+            marks = 2
+            if q.course_outcome:
+                by_co[q.course_outcome] = by_co.get(q.course_outcome, 0) + marks
+            if q.bloom_level:
+                by_bloom[q.bloom_level] = by_bloom.get(q.bloom_level, 0) + marks
+            total_marks += marks
+            part_a_count += 1
+        
+        # Part B: 5 questions × 13 marks = 65 marks (only count one from each OR pair)
+        counted_pairs = set()
+        for q in self.get_part_b_questions():
+            if q.or_pair_number and q.or_pair_number not in counted_pairs:
+                marks = 13
+                if q.course_outcome:
+                    by_co[q.course_outcome] = by_co.get(q.course_outcome, 0) + marks
+                if q.bloom_level:
+                    by_bloom[q.bloom_level] = by_bloom.get(q.bloom_level, 0) + marks
+                total_marks += marks
+                counted_pairs.add(q.or_pair_number)
+                part_b_count += 1
+        
+        # Part C: 1 question × 15 marks = 15 marks
+        for q in self.get_part_c_questions():
+            marks = 15
+            if q.course_outcome:
+                by_co[q.course_outcome] = by_co.get(q.course_outcome, 0) + marks
+            if q.bloom_level:
+                by_bloom[q.bloom_level] = by_bloom.get(q.bloom_level, 0) + marks
+            total_marks += marks
+            part_c_count += 1
+        
+        # Calculate Bloom's level totals and percentages
+        l1_l2_total = by_bloom.get('L1', 0) + by_bloom.get('L2', 0)
+        l3_l4_total = by_bloom.get('L3', 0) + by_bloom.get('L4', 0)
+        l5_l6_total = by_bloom.get('L5', 0) + by_bloom.get('L6', 0)
+        
+        l1_l2_percentage = (l1_l2_total / total_marks * 100) if total_marks > 0 else 0
+        l3_l4_percentage = (l3_l4_total / total_marks * 100) if total_marks > 0 else 0
+        l5_l6_percentage = (l5_l6_total / total_marks * 100) if total_marks > 0 else 0
+        
+        # Calculate CO distribution
+        co_distribution = {}
+        for co, marks in by_co.items():
+            co_distribution[co] = {
+                'marks': marks,
+                'percentage': (marks / total_marks * 100) if total_marks > 0 else 0
+            }
+        
+        return {
+            'by_co': by_co,
+            'by_bloom': by_bloom,
+            'total_marks': total_marks,
+            'part_a_count': part_a_count,
+            'part_b_count': part_b_count,
+            'part_c_count': part_c_count,
+            # Template-expected fields
+            'l1_l2_total': l1_l2_total,
+            'l3_l4_total': l3_l4_total,
+            'l5_l6_total': l5_l6_total,
+            'l1_l2_percentage': l1_l2_percentage,
+            'l3_l4_percentage': l3_l4_percentage,
+            'l5_l6_percentage': l5_l6_percentage,
+            'co_distribution': co_distribution,
+        }
+    
+    def validate_distribution(self):
+        """Validate question paper meets R2023 requirements"""
+        errors = []
+        dist = self.calculate_marks_distribution()
+        
+        # Check total marks
+        if dist['total_marks'] != 100:
+            errors.append(f"Total marks should be 100, got {dist['total_marks']}")
+        
+        # Check Part A count
+        if dist['part_a_count'] != 10:
+            errors.append(f"Part A should have 10 questions, got {dist['part_a_count']}")
+        
+        # Check Part B count (5 OR pairs)
+        if dist['part_b_count'] != 5:
+            errors.append(f"Part B should have 5 question pairs, got {dist['part_b_count']}")
+        
+        # Check Part C count
+        if dist['part_c_count'] != 1:
+            errors.append(f"Part C should have 1 question, got {dist['part_c_count']}")
+        
+        return errors
+
+
+class QPQuestion(models.Model):
+    """Individual questions for structured question papers"""
+    
+    PART_CHOICES = [
+        ('A', 'Part A - Short Answer (2 marks)'),
+        ('B', 'Part B - Descriptive (13 marks)'),
+        ('C', 'Part C - Problem Solving (15 marks)'),
+    ]
+    
+    CO_CHOICES = [
+        ('CO1', 'CO1'),
+        ('CO2', 'CO2'),
+        ('CO3', 'CO3'),
+        ('CO4', 'CO4'),
+        ('CO5', 'CO5'),
+    ]
+    
+    BLOOM_CHOICES = [
+        ('L1', 'L1 - Remember'),
+        ('L2', 'L2 - Understand'),
+        ('L3', 'L3 - Apply'),
+        ('L4', 'L4 - Analyze'),
+        ('L5', 'L5 - Evaluate'),
+        ('L6', 'L6 - Create'),
+    ]
+    
+    question_paper = models.ForeignKey(StructuredQuestionPaper, on_delete=models.CASCADE, related_name='questions')
+    part = models.CharField(max_length=1, choices=PART_CHOICES)
+    question_number = models.IntegerField(help_text='Question number (1-16)')
+    
+    # OR options (for Part B)
+    is_or_option = models.BooleanField(default=False)
+    or_pair_number = models.IntegerField(null=True, blank=True, help_text='For Part B: 11, 12, 13, 14, 15')
+    option_label = models.CharField(max_length=5, blank=True, help_text='(a) or (b) for OR options')
+    
+    # Question text
+    question_text = models.TextField(help_text='Main question text')
+    
+    # Answer for the question (selected by faculty from AI suggestions)
+    answer = models.TextField(blank=True, help_text='Selected answer for answer key')
+    
+    # Subdivisions (max 2 for Part B)
+    has_subdivisions = models.BooleanField(default=False)
+    subdivision_1_text = models.TextField(blank=True)
+    subdivision_1_marks = models.IntegerField(null=True, blank=True)
+    subdivision_2_text = models.TextField(blank=True)
+    subdivision_2_marks = models.IntegerField(null=True, blank=True)
+    
+    # Mapping
+    course_outcome = models.CharField(max_length=5, choices=CO_CHOICES)
+    bloom_level = models.CharField(max_length=5, choices=BLOOM_CHOICES)
+    marks = models.IntegerField()
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'main_app_qpquestion'
+        verbose_name = 'Question Paper Question'
+        verbose_name_plural = 'Question Paper Questions'
+        ordering = ['part', 'question_number', 'option_label']
+    
+    def __str__(self):
+        return f'Q{self.question_number}{self.option_label} - {self.question_text[:50]}'

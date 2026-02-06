@@ -15,7 +15,8 @@ from .models import (
     LeaveRequest, Feedback, Event, EventRegistration,
     Notification, Announcement, QuestionPaperAssignment,
     Timetable, TimetableEntry, TimeSlot,
-    PROGRAM_TYPE_CHOICES  # Module-level constant
+    StructuredQuestionPaper, QPQuestion, ExamSchedule,
+    PROGRAM_TYPE_CHOICES
 )
 
 
@@ -802,3 +803,174 @@ class TimeSlotForm(FormSettings):
             'start_time': forms.TimeInput(attrs={'type': 'time'}),
             'end_time': forms.TimeInput(attrs={'type': 'time'}),
         }
+
+
+# =============================================================================
+
+# Forms restored - need multi-field implementation
+
+# =============================================================================
+# STRUCTURED QUESTION PAPER FORMS (Multi-field version)
+# =============================================================================
+
+from django.forms import inlineformset_factory
+
+class StructuredQuestionPaperForm(FormSettings):
+    class Meta:
+        model = StructuredQuestionPaper
+        fields = ["course", "academic_year", "semester", "regulation", "exam_month_year", 
+                  "co1_description", "co2_description", "co3_description", "co4_description", "co5_description"]
+        widgets = {
+            "exam_month_year": TextInput(attrs={"placeholder": "e.g., NOV/DEC 2023"}),
+            "co1_description": forms.Textarea(attrs={"rows": 2}),
+            "co2_description": forms.Textarea(attrs={"rows": 2}),
+            "co3_description": forms.Textarea(attrs={"rows": 2}),
+            "co4_description": forms.Textarea(attrs={"rows": 2}),
+            "co5_description": forms.Textarea(attrs={"rows": 2}),
+        }
+
+class QPQuestionForm(forms.ModelForm):
+    class Meta:
+        model = QPQuestion
+        fields = ["question_text", "has_subdivisions", "subdivision_1_text", "subdivision_1_marks",
+                  "subdivision_2_text", "subdivision_2_marks", "course_outcome", "bloom_level"]
+
+PartAFormSet = inlineformset_factory(StructuredQuestionPaper, QPQuestion, form=QPQuestionForm,
+    extra=10, max_num=10, can_delete=False, fields=["question_text", "course_outcome", "bloom_level"])
+PartBFormSet = inlineformset_factory(StructuredQuestionPaper, QPQuestion, form=QPQuestionForm,
+    extra=10, max_num=10, can_delete=False, fields=["question_text", "has_subdivisions", "subdivision_1_text",
+    "subdivision_1_marks", "subdivision_2_text", "subdivision_2_marks", "course_outcome", "bloom_level"])
+PartCFormSet = inlineformset_factory(StructuredQuestionPaper, QPQuestion, form=QPQuestionForm,
+    extra=1, max_num=1, can_delete=False, fields=["question_text", "course_outcome", "bloom_level"])
+
+
+# =============================================================================
+# EXAM SCHEDULE FORMS
+# =============================================================================
+
+class ExamScheduleForm(FormSettings):
+    """Form for HOD to schedule exams for approved question papers"""
+    
+    class Meta:
+        model = ExamSchedule
+        fields = [
+            'structured_qp', 'exam_date', 'start_time', 'end_time',
+            'duration_minutes', 'venue', 'batch_labels', 'semester',
+            'release_qp_after_exam', 'release_answers_after_exam'
+        ]
+        widgets = {
+            'exam_date': DateInput(attrs={'type': 'date', 'class': 'form-control'}),
+            'start_time': forms.TimeInput(attrs={'type': 'time', 'class': 'form-control'}),
+            'end_time': forms.TimeInput(attrs={'type': 'time', 'class': 'form-control'}),
+            'duration_minutes': forms.NumberInput(attrs={'class': 'form-control', 'min': 30, 'max': 300}),
+            'venue': TextInput(attrs={'class': 'form-control', 'placeholder': 'e.g., Examination Hall 1'}),
+            'batch_labels': TextInput(attrs={'class': 'form-control', 'placeholder': 'e.g., N,P,Q'}),
+        }
+    
+    def __init__(self, *args, **kwargs):
+        super(ExamScheduleForm, self).__init__(*args, **kwargs)
+        # Only show approved question papers
+        self.fields['structured_qp'].queryset = StructuredQuestionPaper.objects.filter(
+            status='APPROVED'
+        ).select_related('course', 'faculty')
+        self.fields['structured_qp'].label_from_instance = lambda obj: f"{obj.course.course_code} - {obj.course.title} ({obj.exam_month_year})"
+    
+    def clean(self):
+        cleaned_data = super().clean()
+        exam_date = cleaned_data.get('exam_date')
+        start_time = cleaned_data.get('start_time')
+        end_time = cleaned_data.get('end_time')
+        
+        if start_time and end_time and start_time >= end_time:
+            raise ValidationError("End time must be after start time")
+        
+        return cleaned_data
+
+
+class ExamScheduleEditForm(FormSettings):
+    """Form for editing existing exam schedules (without changing the QP)"""
+    
+    class Meta:
+        model = ExamSchedule
+        fields = [
+            'exam_date', 'start_time', 'end_time',
+            'duration_minutes', 'venue', 'batch_labels', 'semester',
+            'release_qp_after_exam', 'release_answers_after_exam', 'status'
+        ]
+        widgets = {
+            'exam_date': DateInput(attrs={'type': 'date', 'class': 'form-control'}),
+            'start_time': forms.TimeInput(attrs={'type': 'time', 'class': 'form-control'}),
+            'end_time': forms.TimeInput(attrs={'type': 'time', 'class': 'form-control'}),
+            'duration_minutes': forms.NumberInput(attrs={'class': 'form-control', 'min': 30, 'max': 300}),
+            'venue': TextInput(attrs={'class': 'form-control', 'placeholder': 'e.g., Examination Hall 1'}),
+            'batch_labels': TextInput(attrs={'class': 'form-control', 'placeholder': 'e.g., N,P,Q'}),
+        }
+    
+    def clean(self):
+        cleaned_data = super().clean()
+        start_time = cleaned_data.get('start_time')
+        end_time = cleaned_data.get('end_time')
+        
+        if start_time and end_time and start_time >= end_time:
+            raise ValidationError("End time must be after start time")
+        
+        # Check if exam has ended - prevent editing
+        if self.instance and self.instance.pk:
+            if self.instance.is_exam_ended:
+                raise ValidationError("Cannot edit schedule after exam has ended")
+        
+        return cleaned_data
+
+
+class UploadQuestionPaperForm(FormSettings):
+    """Form for Faculty to upload a question paper document directly"""
+    
+    course = forms.ModelChoiceField(
+        queryset=Course.objects.all(),
+        widget=forms.Select(attrs={'class': 'form-control select2'})
+    )
+    academic_year = forms.ModelChoiceField(
+        queryset=AcademicYear.objects.all().order_by('-year'),
+        widget=forms.Select(attrs={'class': 'form-control'})
+    )
+    semester = forms.ModelChoiceField(
+        queryset=Semester.objects.all(),
+        widget=forms.Select(attrs={'class': 'form-control'})
+    )
+    regulation = forms.ModelChoiceField(
+        queryset=Regulation.objects.filter(is_active=True),
+        widget=forms.Select(attrs={'class': 'form-control'})
+    )
+    exam_month_year = forms.CharField(
+        max_length=50,
+        widget=TextInput(attrs={'class': 'form-control', 'placeholder': 'e.g., NOV/DEC 2023'})
+    )
+    uploaded_document = forms.FileField(
+        widget=forms.FileInput(attrs={'class': 'form-control', 'accept': '.doc,.docx,.pdf'}),
+        help_text='Upload question paper in Word (.doc, .docx) or PDF format. Max 10MB.'
+    )
+    
+    class Meta:
+        model = StructuredQuestionPaper
+        fields = ['course', 'academic_year', 'semester', 'regulation', 'exam_month_year', 'uploaded_document']
+    
+    def __init__(self, *args, **kwargs):
+        self.faculty = kwargs.pop('faculty', None)
+        super().__init__(*args, **kwargs)
+        self.fields['course'].queryset = Course.objects.filter(is_active=True).order_by('course_code')
+        self.fields['academic_year'].queryset = AcademicYear.objects.all().order_by('-year')
+        self.fields['semester'].queryset = Semester.objects.all().order_by('-academic_year', 'semester_number')
+        self.fields['regulation'].queryset = Regulation.objects.filter(is_active=True).order_by('-year')
+    
+    def clean_uploaded_document(self):
+        file = self.cleaned_data.get('uploaded_document')
+        if file:
+            # Check file extension
+            allowed_extensions = ['.doc', '.docx', '.pdf']
+            ext = '.' + file.name.split('.')[-1].lower()
+            if ext not in allowed_extensions:
+                raise ValidationError('Only Word documents (.doc, .docx) and PDF files are allowed.')
+            # Check file size (max 10MB)
+            if file.size > 10 * 1024 * 1024:
+                raise ValidationError('File size must be under 10MB.')
+        return file

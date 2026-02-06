@@ -1,4 +1,4 @@
-"""
+﻿"""
 Anna University CSE Department ERP System
 HOD (Head of Department) Views
 """
@@ -31,14 +31,16 @@ from .forms import (
     EventForm, LeaveApprovalForm, FeedbackReplyForm, AnnouncementForm,
     FacultyProfileEditForm, StudentProfileEditForm, AccountUserForm,
     QuestionPaperAssignmentForm, QuestionPaperReviewForm,
-    TimetableForm, TimetableEntryForm, TimeSlotForm, ProgramForm
+    TimetableForm, TimetableEntryForm, TimeSlotForm, ProgramForm,
+    ExamScheduleForm, ExamScheduleEditForm
 )
 from .models import (
     Account_User, Faculty_Profile, Student_Profile, NonTeachingStaff_Profile,
     Course, Course_Assignment, Attendance, Regulation, CourseCategory, AcademicYear, Semester,
     Publication, Student_Achievement, Lab_Issue_Log, LeaveRequest, Feedback,
     Event, EventRegistration, Notification, Announcement, QuestionPaperAssignment,
-    Timetable, TimetableEntry, TimeSlot, Program, RegulationCoursePlan, SemesterPromotion,
+    Timetable, TimetableEntry, TimeSlot, Program, ExamSchedule, StructuredQuestionPaper,
+    RegulationCoursePlan, SemesterPromotion,
     ProgramBatch, ElectiveVertical, ElectiveCourseOffering
 )
 from .utils.web_scrapper import fetch_acoe_updates
@@ -2811,7 +2813,7 @@ def manage_qp_assignments(request):
     
     assignments = QuestionPaperAssignment.objects.all().select_related(
         'course', 'assigned_faculty__user', 'academic_year', 'semester'
-    ).order_by('-created_at')
+    ).prefetch_related('structured_qp').order_by('-created_at')
     
     if status_filter:
         assignments = assignments.filter(status=status_filter)
@@ -3898,126 +3900,412 @@ def get_students_for_promotion(request):
     return JsonResponse({'students': data})
 
 
+# =============================================================================
+# STRUCTURED QUESTION PAPER - HOD REVIEW
+# =============================================================================
+
 @login_required
-def bulk_promote_semester(request):
-    """
-    Bulk promotion for all students in a semester after its end date.
-    - Odd Sem (1,3,5,7) → Next Sem (same year of study initially, then changes)
-    - Even Sem (2,4,6,8) → Next Sem (year of study changes)
-    - 8th Sem students → Marked as GRADUATED
-    """
+def hod_review_structured_qps(request):
+    """List all structured question papers for HOD review"""
+    from main_app.models import StructuredQuestionPaper
+    
     if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
         return redirect('/')
     
-    from django.utils import timezone
-    from django.db import transaction
-    today = timezone.now().date()
+    # Get all structured QPs
+    qps = StructuredQuestionPaper.objects.all().select_related(
+        'faculty__user', 'course', 'academic_year', 'semester', 'regulation'
+    ).order_by('-submitted_at', '-created_at')
     
-    # Get semesters that have ended (eligible for promotion)
-    completed_semesters = Semester.objects.filter(
-        end_date__lt=today
-    ).select_related('academic_year').order_by('-end_date')
-    
-    # Get student counts per semester
-    semester_data = []
-    for sem in completed_semesters:
-        student_count = Student_Profile.objects.filter(
-            current_sem=sem.semester_number,
-            status='ACTIVE'
-        ).count()
-        
-        # Check if promotion already done for this semester
-        already_promoted = SemesterPromotion.objects.filter(
-            from_semester=sem.semester_number,
-            academic_year=sem.academic_year
-        ).exists()
-        
-        if student_count > 0 or already_promoted:
-            semester_data.append({
-                'semester': sem,
-                'student_count': student_count,
-                'already_promoted': already_promoted,
-                'is_final_sem': sem.semester_number == 8,
-                'next_sem': sem.semester_number + 1 if sem.semester_number < 8 else None,
-                'current_year': (sem.semester_number + 1) // 2,
-                'next_year': (sem.semester_number + 2) // 2 if sem.semester_number < 8 else None,
-            })
-    
-    if request.method == 'POST':
-        semester_id = request.POST.get('semester_id')
-        action = request.POST.get('action', 'promote')  # 'promote' or 'graduate'
-        
-        semester_obj = get_object_or_404(Semester, id=semester_id)
-        
-        # Verify semester has ended
-        if semester_obj.end_date >= today:
-            messages.error(request, f"Cannot promote - Semester {semester_obj.semester_number} hasn't ended yet (ends {semester_obj.end_date})")
-            return redirect('bulk_promote_semester')
-        
-        with transaction.atomic():
-            students = Student_Profile.objects.filter(
-                current_sem=semester_obj.semester_number,
-                status='ACTIVE'
-            )
-            
-            promoted_count = 0
-            graduated_count = 0
-            
-            for student in students:
-                old_sem = student.current_sem
-                old_year = student.year_of_study
-                
-                if old_sem == 8:
-                    # Final semester - Graduate the student
-                    student.status = 'GRADUATED'
-                    student.graduation_year = today.year
-                    student.save()
-                    
-                    # Log the graduation
-                    SemesterPromotion.objects.create(
-                        student=student,
-                        from_semester=old_sem,
-                        to_semester=old_sem,  # Stays at 8
-                        from_year=old_year,
-                        to_year=old_year,
-                        academic_year=semester_obj.academic_year,
-                        promotion_type='BULK',
-                        promoted_by=request.user,
-                        remarks=f"Graduated - Completed 8th semester"
-                    )
-                    graduated_count += 1
-                else:
-                    # Promote to next semester
-                    student.current_sem = old_sem + 1
-                    student.save()
-                    
-                    # Log the promotion
-                    SemesterPromotion.objects.create(
-                        student=student,
-                        from_semester=old_sem,
-                        to_semester=student.current_sem,
-                        from_year=old_year,
-                        to_year=student.year_of_study,
-                        academic_year=semester_obj.academic_year,
-                        promotion_type='BULK',
-                        promoted_by=request.user,
-                        remarks=f"Bulk promoted after Sem {old_sem} completion"
-                    )
-                    promoted_count += 1
-            
-            if promoted_count > 0:
-                messages.success(request, f"Successfully promoted {promoted_count} student(s) from Semester {semester_obj.semester_number} to Semester {semester_obj.semester_number + 1}")
-            if graduated_count > 0:
-                messages.success(request, f"Congratulations! {graduated_count} student(s) have graduated (completed 8th semester)")
-            
-            if promoted_count == 0 and graduated_count == 0:
-                messages.info(request, "No students found to promote in this semester")
-        
-        return redirect('bulk_promote_semester')
+    # Filter by status if provided
+    status_filter = request.GET.get('status')
+    if status_filter:
+        qps = qps.filter(status=status_filter)
     
     context = {
-        'page_title': 'Bulk Semester Promotion',
-        'semester_data': semester_data,
-        'today': today,
+        'qps': qps,
+        'status_filter': status_filter,
+        'page_title': 'Review Structured Question Papers'
     }
-    return render(request, 'hod_template/bulk_promote.html', context)
+    return render(request, "hod_template/review_structured_qps.html", context)
+
+
+@login_required
+def hod_review_structured_qp_detail(request, qp_id):
+    """Detailed review of a structured question paper"""
+    from main_app.models import StructuredQuestionPaper
+    
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    qp = get_object_or_404(StructuredQuestionPaper, id=qp_id)
+    
+    # Update status if viewing for first time
+    if qp.status == 'SUBMITTED':
+        qp.status = 'UNDER_REVIEW'
+        qp.save()
+    
+    # Calculate distribution and validation
+    distribution = qp.calculate_marks_distribution()
+    validation_errors = qp.validate_distribution()
+    
+    # Get questions by part
+    part_a_questions = qp.get_part_a_questions()
+    part_b_questions = qp.get_part_b_questions()
+    part_c_questions = qp.get_part_c_questions()
+    
+    # Group Part B by OR pairs
+    part_b_pairs = {}
+    for q in part_b_questions:
+        if q.or_pair_number not in part_b_pairs:
+            part_b_pairs[q.or_pair_number] = []
+        part_b_pairs[q.or_pair_number].append(q)
+    
+    context = {
+        'qp': qp,
+        'part_a_questions': part_a_questions,
+        'part_b_pairs': sorted(part_b_pairs.items()),
+        'part_c_questions': part_c_questions,
+        'distribution': distribution,
+        'validation_errors': validation_errors,
+        'can_approve': len(validation_errors) == 0,
+        'page_title': f'Review QP - {qp.course.course_code}'
+    }
+    return render(request, "hod_template/review_structured_qp_detail.html", context)
+
+
+@login_required
+def hod_approve_structured_qp(request, qp_id):
+    """Approve a structured question paper"""
+    from main_app.models import StructuredQuestionPaper
+    from django.utils import timezone
+    
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    qp = get_object_or_404(StructuredQuestionPaper, id=qp_id)
+    
+    # Validate can approve
+    if qp.status == 'APPROVED':
+        messages.warning(request, "Question paper already approved.")
+        return redirect('hod_review_structured_qp_detail', qp_id=qp.id)
+    
+    # Check validation
+    validation_errors = qp.validate_distribution()
+    if validation_errors:
+        messages.error(request, "Cannot approve: " + "; ".join(validation_errors))
+        return redirect('hod_review_structured_qp_detail', qp_id=qp.id)
+    
+    if request.method == 'POST':
+        comments = request.POST.get('hod_comments', '')
+        
+        qp.status = 'APPROVED'
+        qp.hod_comments = comments
+        qp.reviewed_by = request.user
+        qp.reviewed_at = timezone.now()
+        qp.save()
+        
+        # Update assignment if linked
+        if qp.qp_assignment:
+            qp.qp_assignment.status = 'APPROVED'
+            qp.qp_assignment.hod_comments = comments
+            qp.qp_assignment.reviewed_at = timezone.now()
+            qp.qp_assignment.save()
+        
+        # Notify faculty
+        Notification.objects.create(
+            recipient=qp.faculty.user,
+            title='Question Paper Approved',
+            message=f'Your structured question paper for {qp.course.course_code} has been approved by HOD',
+            notification_type='INFO'
+        )
+        
+        messages.success(request, f"Question paper for {qp.course.course_code} approved successfully!")
+        return redirect('hod_review_structured_qps')
+    
+    context = {
+        'qp': qp,
+        'page_title': f'Approve QP - {qp.course.course_code}'
+    }
+    return render(request, "hod_template/approve_structured_qp.html", context)
+
+
+@login_required
+def hod_reject_structured_qp(request, qp_id):
+    """Reject a structured question paper with feedback"""
+    from main_app.models import StructuredQuestionPaper
+    from django.utils import timezone
+    
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    qp = get_object_or_404(StructuredQuestionPaper, id=qp_id)
+    
+    if qp.status == 'APPROVED':
+        messages.error(request, "Cannot reject an approved question paper.")
+        return redirect('hod_review_structured_qp_detail', qp_id=qp.id)
+    
+    if request.method == 'POST':
+        rejection_reason = request.POST.get('rejection_reason', '')
+        
+        if not rejection_reason:
+            messages.error(request, "Rejection reason is required.")
+            return redirect('hod_review_structured_qp_detail', qp_id=qp.id)
+        
+        qp.status = 'REJECTED'
+        qp.hod_comments = rejection_reason
+        qp.reviewed_by = request.user
+        qp.reviewed_at = timezone.now()
+        qp.save()
+        
+        # Update assignment if linked
+        if qp.qp_assignment:
+            qp.qp_assignment.status = 'REJECTED'
+            qp.qp_assignment.hod_comments = rejection_reason
+            qp.qp_assignment.reviewed_at = timezone.now()
+            qp.qp_assignment.save()
+        
+        # Notify faculty
+        Notification.objects.create(
+            recipient=qp.faculty.user,
+            title='Question Paper Rejected',
+            message=f'Your structured question paper for {qp.course.course_code} requires revision. Reason: {rejection_reason[:100]}',
+            notification_type='WARNING'
+        )
+        
+        messages.warning(request, f"Question paper rejected. Faculty has been notified.")
+        return redirect('hod_review_structured_qps')
+    
+    context = {
+        'qp': qp,
+        'page_title': f'Reject QP - {qp.course.course_code}'
+    }
+    return render(request, "hod_template/reject_structured_qp.html", context)
+
+
+@login_required
+def hod_download_structured_qp(request, qp_id):
+    """Download structured question paper document"""
+    from main_app.models import StructuredQuestionPaper
+    from django.http import FileResponse, Http404
+    
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    qp = get_object_or_404(StructuredQuestionPaper, id=qp_id)
+    
+    if not qp.generated_document:
+        raise Http404("Document not generated yet")
+    
+    response = FileResponse(qp.generated_document.open('rb'), content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    response['Content-Disposition'] = f'attachment; filename="{qp.generated_document.name.split("/")[-1]}"'
+    return response
+
+
+# =============================================================================
+# EXAM SCHEDULE MANAGEMENT
+# =============================================================================
+
+@login_required
+def manage_exam_schedules(request):
+    """View and manage all exam schedules"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    # Update status of all schedules based on current time
+    schedules = ExamSchedule.objects.select_related(
+        'structured_qp', 'structured_qp__course', 'structured_qp__faculty',
+        'semester', 'scheduled_by'
+    ).order_by('-exam_date', '-start_time')
+    
+    # Update statuses
+    for schedule in schedules:
+        schedule.update_status()
+    
+    # Filter options
+    status_filter = request.GET.get('status', '')
+    course_filter = request.GET.get('course', '')
+    
+    if status_filter:
+        schedules = schedules.filter(status=status_filter)
+    if course_filter:
+        schedules = schedules.filter(structured_qp__course__id=course_filter)
+    
+    # Get courses for filter dropdown
+    courses = Course.objects.filter(
+        id__in=ExamSchedule.objects.values_list('structured_qp__course', flat=True)
+    ).distinct()
+    
+    context = {
+        'schedules': schedules,
+        'courses': courses,
+        'status_filter': status_filter,
+        'course_filter': course_filter,
+        'page_title': 'Manage Exam Schedules'
+    }
+    return render(request, 'hod_template/manage_exam_schedules.html', context)
+
+
+@login_required
+def schedule_exam(request):
+    """HOD schedules an exam for an approved question paper"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    if request.method == 'POST':
+        form = ExamScheduleForm(request.POST)
+        if form.is_valid():
+            schedule = form.save(commit=False)
+            schedule.scheduled_by = request.user
+            schedule.save()
+            
+            # Notify relevant students
+            course = schedule.structured_qp.course
+            messages.success(
+                request, 
+                f"Exam scheduled for {course.course_code} - {course.title} on {schedule.exam_date}"
+            )
+            return redirect('manage_exam_schedules')
+    else:
+        form = ExamScheduleForm()
+    
+    # Get approved QPs that don't have schedules yet
+    approved_qps = StructuredQuestionPaper.objects.filter(
+        status='APPROVED'
+    ).exclude(
+        exam_schedule__isnull=False
+    ).select_related('course', 'faculty')
+    
+    context = {
+        'form': form,
+        'approved_qps': approved_qps,
+        'page_title': 'Schedule Exam'
+    }
+    return render(request, 'hod_template/schedule_exam.html', context)
+
+
+@login_required
+def edit_exam_schedule(request, schedule_id):
+    """Edit an existing exam schedule (only if exam hasn't ended)"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    schedule = get_object_or_404(ExamSchedule, id=schedule_id)
+    
+    # Check if editable
+    if schedule.is_exam_ended:
+        messages.error(request, "Cannot edit schedule after exam has ended.")
+        return redirect('manage_exam_schedules')
+    
+    if request.method == 'POST':
+        form = ExamScheduleEditForm(request.POST, instance=schedule)
+        if form.is_valid():
+            form.save()
+            messages.success(request, "Exam schedule updated successfully.")
+            return redirect('manage_exam_schedules')
+    else:
+        form = ExamScheduleEditForm(instance=schedule)
+    
+    context = {
+        'form': form,
+        'schedule': schedule,
+        'page_title': f'Edit Exam Schedule - {schedule.structured_qp.course.course_code}'
+    }
+    return render(request, 'hod_template/edit_exam_schedule.html', context)
+
+
+@login_required
+def delete_exam_schedule(request, schedule_id):
+    """Delete an exam schedule (only if exam hasn't started)"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    schedule = get_object_or_404(ExamSchedule, id=schedule_id)
+    
+    # Only allow deletion if exam hasn't started
+    if schedule.is_exam_started:
+        messages.error(request, "Cannot delete schedule after exam has started.")
+        return redirect('manage_exam_schedules')
+    
+    course_code = schedule.structured_qp.course.course_code
+    schedule.delete()
+    messages.success(request, f"Exam schedule for {course_code} deleted successfully.")
+    return redirect('manage_exam_schedules')
+
+
+@login_required
+def view_exam_schedule_detail(request, schedule_id):
+    """View detailed information about an exam schedule"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    schedule = get_object_or_404(
+        ExamSchedule.objects.select_related(
+            'structured_qp', 'structured_qp__course', 'structured_qp__faculty',
+            'semester', 'scheduled_by'
+        ),
+        id=schedule_id
+    )
+    
+    # Update status
+    schedule.update_status()
+    
+    # Get questions for this QP
+    questions = schedule.structured_qp.questions.all().order_by('part', 'question_number')
+    
+    context = {
+        'schedule': schedule,
+        'questions': questions,
+        'page_title': f'Exam Schedule - {schedule.structured_qp.course.course_code}'
+    }
+    return render(request, 'hod_template/exam_schedule_detail.html', context)
+
+
+@login_required
+def mark_exam_completed(request, schedule_id):
+    """Manually mark an exam as completed"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    schedule = get_object_or_404(ExamSchedule, id=schedule_id)
+    
+    if request.method == 'POST':
+        schedule.status = 'COMPLETED'
+        schedule.save()
+        messages.success(request, "Exam marked as completed. QP and answers will now be visible to students.")
+        return redirect('manage_exam_schedules')
+    
+    return redirect('view_exam_schedule_detail', schedule_id=schedule_id)
+
+
+@login_required
+def cancel_exam_schedule(request, schedule_id):
+    """Cancel an exam schedule"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    schedule = get_object_or_404(ExamSchedule, id=schedule_id)
+    
+    if schedule.is_exam_ended:
+        messages.error(request, "Cannot cancel an exam that has already ended.")
+        return redirect('manage_exam_schedules')
+    
+    if request.method == 'POST':
+        schedule.status = 'CANCELLED'
+        schedule.save()
+        messages.warning(request, f"Exam for {schedule.structured_qp.course.course_code} has been cancelled.")
+        return redirect('manage_exam_schedules')
+    
+    return redirect('view_exam_schedule_detail', schedule_id=schedule_id)

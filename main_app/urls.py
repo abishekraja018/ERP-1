@@ -146,6 +146,13 @@ urlpatterns = [
     path("publications/verify/", hod_views.verify_publications, name='verify_publications'),
     path("publications/approve/<int:publication_id>/", hod_views.approve_publication, name='approve_publication'),
     
+    # Structured Question Paper Review (HOD)
+    path("admin/structured-qp/review/", hod_views.hod_review_structured_qps, name='hod_review_structured_qps'),
+    path("admin/structured-qp/review/<int:qp_id>/", hod_views.hod_review_structured_qp_detail, name='hod_review_structured_qp_detail'),
+    path("admin/structured-qp/approve/<int:qp_id>/", hod_views.hod_approve_structured_qp, name='hod_approve_structured_qp'),
+    path("admin/structured-qp/reject/<int:qp_id>/", hod_views.hod_reject_structured_qp, name='hod_reject_structured_qp'),
+    path("admin/structured-qp/download/<int:qp_id>/", hod_views.hod_download_structured_qp, name='hod_download_structured_qp'),
+    
     # Lab Issues
     path("lab-issues/", hod_views.view_lab_issues, name='view_lab_issues'),
     
@@ -178,6 +185,15 @@ urlpatterns = [
     path("question-paper/review/<int:qp_id>/", hod_views.review_question_paper, name='review_question_paper'),
     path("question-paper/delete/<int:qp_id>/", hod_views.delete_qp_assignment, name='delete_qp_assignment'),
     path("question-paper/get-faculty/", hod_views.get_faculty_for_course, name='get_faculty_for_course'),
+    
+    # Exam Schedule Management (HOD)
+    path("exam-schedule/manage/", hod_views.manage_exam_schedules, name='manage_exam_schedules'),
+    path("exam-schedule/add/", hod_views.schedule_exam, name='schedule_exam'),
+    path("exam-schedule/edit/<int:schedule_id>/", hod_views.edit_exam_schedule, name='edit_exam_schedule'),
+    path("exam-schedule/delete/<int:schedule_id>/", hod_views.delete_exam_schedule, name='delete_exam_schedule'),
+    path("exam-schedule/view/<int:schedule_id>/", hod_views.view_exam_schedule_detail, name='view_exam_schedule_detail'),
+    path("exam-schedule/complete/<int:schedule_id>/", hod_views.mark_exam_completed, name='mark_exam_completed'),
+    path("exam-schedule/cancel/<int:schedule_id>/", hod_views.cancel_exam_schedule, name='cancel_exam_schedule'),
     
     # Timetable Management (HOD)
     path("timetable/manage/", hod_views.manage_timetables, name='manage_timetables'),
@@ -234,6 +250,30 @@ urlpatterns = [
     path("staff/question-paper/submit/<int:qp_id>/", staff_views.staff_submit_question_paper, name='staff_submit_question_paper'),
     path("staff/question-paper/details/<int:qp_id>/", staff_views.staff_view_qp_details, name='staff_view_qp_details'),
     
+    # Structured Question Paper (Staff) - R2023 Format
+    path("staff/structured-qp/list/", staff_views.staff_list_structured_qps, name='staff_list_structured_qps'),
+    path("staff/structured-qp/create/", staff_views.staff_create_structured_qp, name='staff_create_structured_qp'),
+    path("staff/structured-qp/create/<int:assignment_id>/", staff_views.staff_create_structured_qp, name='staff_create_structured_qp_from_assignment'),
+    path("staff/structured-qp/upload/", staff_views.staff_upload_qp, name='staff_upload_qp'),
+    path("staff/structured-qp/edit/<int:qp_id>/", staff_views.staff_edit_structured_qp, name='staff_edit_structured_qp'),
+    path("staff/structured-qp/preview/<int:qp_id>/", staff_views.staff_preview_structured_qp, name='staff_preview_structured_qp'),
+    path("staff/structured-qp/submit/<int:qp_id>/", staff_views.staff_submit_structured_qp, name='staff_submit_structured_qp'),
+    path("staff/structured-qp/download/<int:qp_id>/", staff_views.staff_download_structured_qp, name='staff_download_structured_qp'),
+    path("staff/structured-qp/manage-answers/<int:qp_id>/", staff_views.staff_manage_qp_answers, name='staff_manage_qp_answers'),
+    path("staff/structured-qp/answer-key/<int:qp_id>/", staff_views.staff_download_answer_key, name='staff_download_answer_key'),
+    
+    # AI Answer Generation (AJAX)
+    path("staff/api/generate-answers/", staff_views.staff_generate_answer_options, name='staff_generate_answer_options'),
+    path("staff/api/save-answer/", staff_views.staff_save_question_answer, name='staff_save_question_answer'),
+    
+    # Question Delete (Staff)
+    path("staff/structured-qp/delete-question/<int:question_id>/", staff_views.staff_delete_qp_question, name='staff_delete_qp_question'),
+    path("staff/api/delete-question/", staff_views.staff_delete_qp_question_ajax, name='staff_delete_qp_question_ajax'),
+    
+    # Delete entire QP (Staff)
+    path("staff/structured-qp/delete/<int:qp_id>/", staff_views.staff_delete_structured_qp, name='staff_delete_structured_qp'),
+    path("staff/api/delete-qp/", staff_views.staff_delete_structured_qp_ajax, name='staff_delete_structured_qp_ajax'),
+    
     # Timetable (Staff)
     path("staff/timetable/", staff_views.staff_view_timetable, name='staff_view_timetable'),
     
@@ -269,4 +309,9 @@ urlpatterns = [
     
     # Timetable (Student)
     path("student/timetable/", student_views.student_view_timetable, name='student_view_timetable'),
+    
+    # Released Question Papers (Student)
+    path("student/question-papers/", student_views.student_view_released_qps, name='student_view_released_qps'),
+    path("student/question-papers/<int:schedule_id>/", student_views.student_view_qp_detail, name='student_view_qp_detail'),
+    path("student/question-papers/<int:schedule_id>/answers/", student_views.student_view_answer_key, name='student_view_answer_key'),
 ]
