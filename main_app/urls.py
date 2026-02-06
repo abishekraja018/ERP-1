@@ -80,11 +80,51 @@ urlpatterns = [
     
     # Semester Management
     path("semester/add/", hod_views.add_semester, name='add_semester'),
+    path("semester/add/<int:year_id>/", hod_views.add_semester, name='add_semester_for_year'),
     path("semester/manage/", hod_views.manage_semester, name='manage_semester'),
+    path("semester/edit/<int:semester_id>/", hod_views.edit_semester, name='edit_semester'),
     path("semester/delete/<int:semester_id>/", hod_views.delete_semester, name='delete_semester'),
     
     path("regulation/add/", hod_views.add_regulation, name='add_regulation'),
     path("regulation/manage/", hod_views.manage_regulation, name='manage_regulation'),
+    path("regulation/edit/<int:regulation_id>/", hod_views.edit_regulation, name='edit_regulation'),
+    path("regulation/delete/<int:regulation_id>/", hod_views.delete_regulation, name='delete_regulation'),
+    
+    # Regulation Course Plan Management
+    path("regulation/<int:regulation_id>/courses/", hod_views.manage_regulation_courses, name='manage_regulation_courses'),
+    path("regulation/<int:regulation_id>/courses/add/", hod_views.add_regulation_course, name='add_regulation_course'),
+    path("regulation/course-plan/<int:plan_id>/remove/", hod_views.remove_regulation_course, name='remove_regulation_course'),
+    path("regulation/<int:regulation_id>/courses/bulk-add/", hod_views.bulk_add_regulation_courses, name='bulk_add_regulation_courses'),
+    path("api/courses/search/", hod_views.api_search_courses, name='api_search_courses'),
+    path("api/courses/placeholders/", hod_views.api_get_placeholder_courses, name='api_get_placeholder_courses'),
+    path("api/programs/by-level/", hod_views.api_get_programs_by_level, name='api_get_programs_by_level'),
+    path("api/regulation/<int:regulation_id>/semester-courses/", hod_views.api_get_semester_courses, name='api_get_semester_courses'),
+    path("api/regulation/<int:regulation_id>/add-course/", hod_views.api_add_regulation_course, name='api_add_regulation_course'),
+    path("api/regulation/remove-course/", hod_views.api_remove_regulation_course, name='api_remove_regulation_course'),
+    
+    # Elective Vertical Management APIs
+    path("api/regulation/<int:regulation_id>/verticals/", hod_views.api_get_elective_verticals, name='api_get_elective_verticals'),
+    path("api/regulation/<int:regulation_id>/verticals/add/", hod_views.api_add_elective_vertical, name='api_add_elective_vertical'),
+    path("api/vertical/<int:vertical_id>/edit/", hod_views.api_edit_elective_vertical, name='api_edit_elective_vertical'),
+    path("api/vertical/<int:vertical_id>/delete/", hod_views.api_delete_elective_vertical, name='api_delete_elective_vertical'),
+    
+    # Elective Course Offerings APIs
+    path("api/elective-offerings/", hod_views.api_get_elective_offerings, name='api_get_elective_offerings'),
+    path("api/elective-offerings/add/", hod_views.api_add_elective_offering, name='api_add_elective_offering'),
+    path("api/elective-offerings/remove/", hod_views.api_remove_elective_offering, name='api_remove_elective_offering'),
+    
+    # Semester Course Assignment
+    path("semester/course-assignment/", hod_views.semester_course_assignment, name='semester_course_assignment'),
+    path("semester/course-assignment/create/", hod_views.create_course_assignments, name='create_course_assignments'),
+    
+    # Program Batch Management
+    path("program-batches/", hod_views.manage_program_batches, name='manage_program_batches'),
+    path("program-batches/<int:year_id>/", hod_views.manage_program_batches, name='manage_program_batches_year'),
+    path("program-batches/add/", hod_views.add_program_batch, name='add_program_batch'),
+    path("program-batches/copy/", hod_views.copy_batches_from_previous_year, name='copy_batches_from_previous_year'),
+    path("program-batches/delete/<int:batch_id>/", hod_views.delete_program_batch, name='delete_program_batch'),
+    path("program-batches/<int:year_id>/init/<int:program_id>/", hod_views.initialize_default_batches, name='initialize_default_batches'),
+    path("api/batches/", hod_views.api_get_batches, name='api_get_batches'),
     
     # Program Management
     path("program/add/", hod_views.add_program, name='add_program'),
@@ -153,6 +193,7 @@ urlpatterns = [
     
     # Semester Promotion Management (HOD)
     path("promotions/", hod_views.manage_promotions, name='manage_promotions'),
+    path("promotions/bulk/", hod_views.bulk_promote_semester, name='bulk_promote_semester'),
     path("promotions/run-auto/", hod_views.run_auto_promotion, name='run_auto_promotion'),
     path("promotions/manual/", hod_views.manual_promote_students, name='manual_promote_students'),
     path("promotions/schedule/", hod_views.create_promotion_schedule, name='create_promotion_schedule'),

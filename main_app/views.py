@@ -449,8 +449,8 @@ def announcements(request):
 
 def get_current_academic_context():
     """Get current academic year and semester"""
-    academic_year = AcademicYear.objects.filter(is_current=True).first()
-    semester = Semester.objects.filter(is_current=True).first()
+    academic_year = AcademicYear.get_current()
+    semester = Semester.get_current()
     return {
         'current_academic_year': academic_year,
         'current_semester': semester

@@ -7,6 +7,37 @@
     <div class="container-fluid">
         <div class="row">
             <div class="col-md-8 offset-md-2">
+                
+                <!-- Warning if batches not configured -->
+                {% if programs_without_batches %}
+                <div class="alert alert-danger">
+                    <h5><i class="fas fa-exclamation-circle mr-2"></i>Batch Configuration Required!</h5>
+                    <p class="mb-2">The following programs do not have batch configuration for {{ current_year.year }}:</p>
+                    <ul class="mb-2">
+                        {% for code in programs_without_batches %}
+                        <li><strong>{{ code }}</strong></li>
+                        {% endfor %}
+                    </ul>
+                    <p class="mb-0">
+                        <a href="{% url 'manage_program_batches' %}" class="btn btn-warning btn-sm">
+                            <i class="fas fa-cog mr-1"></i> Configure Batches First
+                        </a>
+                    </p>
+                </div>
+                {% endif %}
+                
+                <!-- Show configured batches info -->
+                {% if configured_batches %}
+                <div class="alert alert-success">
+                    <h6><i class="fas fa-check-circle mr-2"></i>Configured Batches for {{ current_year.year }}:</h6>
+                    <ul class="mb-0">
+                        {% for program, batches in configured_batches.items %}
+                        <li><strong>{{ program }}</strong>: {{ batches|join:", " }}</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
+                
                 <!-- Instructions Card -->
                 <div class="card card-outline card-info mb-4">
                     <div class="card-header">
@@ -14,6 +45,7 @@
                     </div>
                     <div class="card-body">
                         <ol>
+                            <li><strong>Configure batches first</strong> in <a href="{% url 'manage_program_batches' %}">Manage Batches</a></li>
                             <li>Download the <a href="{% url 'download_student_template' %}"><strong>CSV template</strong></a></li>
                             <li>Fill in student details (see required columns below)</li>
                             <li>Save as CSV file (UTF-8 encoding)</li>
@@ -35,10 +67,10 @@
                                 <tr><td><code>full_name</code></td><td>Student's full name</td><td>John Doe</td></tr>
                                 <tr><td><code>email</code></td><td>Email address</td><td>john@student.edu</td></tr>
                                 <tr><td><code>gender</code></td><td>M / F / O</td><td>M</td></tr>
-                                <tr><td><code>batch</code></td><td>N / P / Q</td><td>N</td></tr>
-                                <tr><td><code>branch</code></td><td>CSE / AIML / CSBS</td><td>CSE</td></tr>
+                                <tr><td><code>batch</code></td><td>{% if configured_batches %}{% for p, b in configured_batches.items %}{{ b|join:" / " }}{% if not forloop.last %}, {% endif %}{% endfor %}{% else %}Configure batches first{% endif %}</td><td>{% if configured_batches %}{% for p, b in configured_batches.items %}{{ b.0 }}{% if not forloop.last %}{% endif %}{% endfor %}{% else %}N{% endif %}</td></tr>
+                                <tr><td><code>branch</code></td><td>{% for p, b in configured_batches.items %}{{ p }}{% if not forloop.last %} / {% endif %}{% empty %}CSE{% endfor %}</td><td>CSE</td></tr>
                                 <tr><td><code>program</code></td><td>B.E / M.E / Ph.D</td><td>B.E</td></tr>
-                                <tr><td><code>admission_year</code></td><td>Year of admission</td><td>2023</td></tr>
+                                <tr><td><code>admission_year</code></td><td>Year of admission</td><td>2025</td></tr>
                                 <tr><td><code>current_sem</code></td><td>Current semester (1-8)</td><td>1</td></tr>
                             </tbody>
                         </table>
@@ -77,7 +109,7 @@
                             <a href="{% url 'download_student_template' %}" class="btn btn-info">
                                 <i class="fas fa-download mr-1"></i> Download Template
                             </a>
-                            <button type="submit" class="btn btn-primary float-right">
+                            <button type="submit" class="btn btn-primary float-right" {% if programs_without_batches %}disabled title="Configure batches first"{% endif %}>
                                 <i class="fas fa-upload mr-1"></i> Upload & Process
                             </button>
                         </div>

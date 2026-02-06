@@ -12,6 +12,17 @@ from academics.models import Regulation, Program
 
 
 # =============================================================================
+# SHARED CHOICES (Module Level - DRY principle)
+# =============================================================================
+
+PROGRAM_TYPE_CHOICES = [
+    ('UG', 'Undergraduate'),
+    ('PG', 'Postgraduate'),
+    ('PHD', 'Ph.D.'),
+]
+
+
+# =============================================================================
 # FACULTY PROFILE
 # =============================================================================
 
@@ -96,24 +107,6 @@ class NonTeachingStaff_Profile(models.Model):
 class Student_Profile(models.Model):
     """Profile for Students"""
     
-    BATCH_LABEL_CHOICES = [
-        ('N', 'N Section'),
-        ('P', 'P Section'),
-        ('Q', 'Q Section'),
-    ]
-    
-    BRANCH_CHOICES = [
-        ('CSE', 'Computer Science and Engineering'),
-        ('AIML', 'Artificial Intelligence and Machine Learning'),
-        ('CSBS', 'Computer Science and Business Systems'),
-    ]
-    
-    PROGRAM_TYPE_CHOICES = [
-        ('UG', 'Undergraduate'),
-        ('PG', 'Postgraduate'),
-        ('PHD', 'Ph.D.'),
-    ]
-    
     register_validator = RegexValidator(
         regex=r'^\d{10}$',
         message='Register number must be exactly 10 digits'
@@ -122,9 +115,11 @@ class Student_Profile(models.Model):
     user = models.OneToOneField(Account_User, on_delete=models.CASCADE, related_name='student_profile')
     register_no = models.CharField(max_length=10, unique=True, validators=[register_validator],
                                     verbose_name='Register Number')
-    batch_label = models.CharField(max_length=1, choices=BATCH_LABEL_CHOICES, 
-                                    verbose_name='Classroom Section')
-    branch = models.CharField(max_length=10, choices=BRANCH_CHOICES, default='CSE')
+    batch_label = models.CharField(max_length=10, blank=True, verbose_name='Classroom Section',
+                                    help_text="Legacy field - use batch ForeignKey instead")
+    batch = models.ForeignKey('main_app.ProgramBatch', on_delete=models.SET_NULL, null=True, blank=True,
+                               related_name='students', verbose_name='Classroom Batch')
+    branch = models.CharField(max_length=20, default='CSE', help_text="Program code from Program model")
     program_type = models.CharField(max_length=5, choices=PROGRAM_TYPE_CHOICES, default='UG')
     program = models.ForeignKey(Program, on_delete=models.SET_NULL, null=True, blank=True,
                                  related_name='students', verbose_name='Academic Program',
@@ -169,3 +164,10 @@ class Student_Profile(models.Model):
     def college_email(self):
         """Generate college email from register number: <register_no>@student.annauniv.edu"""
         return f"{self.register_no}@student.annauniv.edu"
+    
+    @property
+    def batch_display(self):
+        """Display batch from ForeignKey or legacy batch_label"""
+        if self.batch:
+            return self.batch.batch_display
+        return self.batch_label or "Not Assigned"

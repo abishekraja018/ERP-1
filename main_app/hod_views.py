@@ -17,6 +17,7 @@ from django.urls import reverse
 from django.views.decorators.csrf import csrf_exempt
 from django.contrib.auth.decorators import login_required
 from django.db.models import Count, Q
+from django.db import transaction
 from datetime import datetime
 from django.core.mail import send_mail
 from django.conf import settings
@@ -34,10 +35,11 @@ from .forms import (
 )
 from .models import (
     Account_User, Faculty_Profile, Student_Profile, NonTeachingStaff_Profile,
-    Course, Course_Assignment, Attendance, Regulation, AcademicYear, Semester,
+    Course, Course_Assignment, Attendance, Regulation, CourseCategory, AcademicYear, Semester,
     Publication, Student_Achievement, Lab_Issue_Log, LeaveRequest, Feedback,
     Event, EventRegistration, Notification, Announcement, QuestionPaperAssignment,
-    Timetable, TimetableEntry, TimeSlot, Program
+    Timetable, TimetableEntry, TimeSlot, Program, RegulationCoursePlan, SemesterPromotion,
+    ProgramBatch, ElectiveVertical, ElectiveCourseOffering
 )
 from .utils.web_scrapper import fetch_acoe_updates
 from .utils.cir_scrapper import fetch_cir_ticker_announcements
@@ -165,9 +167,9 @@ def admin_home(request):
     # Department announcements
     dept_announcements = Announcement.objects.filter(is_active=True)[:5]
     
-    # Current academic context
-    current_year = AcademicYear.objects.filter(is_current=True).first()
-    current_semester = Semester.objects.filter(is_current=True).first()
+    # Current academic context (auto-detected from dates)
+    current_year = AcademicYear.get_current()
+    current_semester = Semester.get_current()
 
     context = {
         'page_title': "HOD Dashboard - CSE Department",
@@ -374,6 +376,15 @@ def add_student(request):
                 student.program_type = form.cleaned_data['program_type']
                 student.admission_year = form.cleaned_data['admission_year']
                 student.current_sem = form.cleaned_data.get('current_sem', 1)
+                
+                # Auto-assign regulation based on admission year
+                admission_year = form.cleaned_data['admission_year']
+                regulation = Regulation.objects.filter(
+                    year__lte=admission_year
+                ).order_by('-year').first()
+                if regulation:
+                    student.regulation = regulation
+                
                 student.save()
                 
                 # Send first-time login notification to college email
@@ -418,11 +429,24 @@ def manage_student(request):
     if semester:
         students = students.filter(current_sem=semester)
     
+    # Get programs from database for branch filtering
+    all_programs = Program.objects.all().order_by('level', 'code')
+    
+    # Get batch choices from database
+    current_year = AcademicYear.get_current()
+    if current_year:
+        batch_choices = list(ProgramBatch.objects.filter(
+            academic_year=current_year,
+            is_active=True
+        ).values_list('batch_name', 'batch_display').distinct().order_by('batch_name'))
+    else:
+        batch_choices = []
+    
     context = {
         'students': students,
         'page_title': 'Manage Students',
-        'branch_choices': Student_Profile.BRANCH_CHOICES,
-        'batch_choices': Student_Profile.BATCH_LABEL_CHOICES,
+        'all_programs': all_programs,
+        'batch_choices': batch_choices,
     }
     return render(request, "hod_template/manage_student.html", context)
 
@@ -519,25 +543,22 @@ def manage_course(request):
     if not check_hod_permission(request.user):
         return redirect('/')
     
-    courses = Course.objects.select_related('regulation').all()
+    courses = Course.objects.all()
     
     # Apply filters
-    regulation = request.GET.get('regulation')
-    semester = request.GET.get('semester')
-    branch = request.GET.get('branch')
+    course_type = request.GET.get('course_type')
+    search = request.GET.get('search', '').strip()
     
-    if regulation:
-        courses = courses.filter(regulation_id=regulation)
-    if semester:
-        courses = courses.filter(semester=semester)
-    if branch:
-        courses = courses.filter(branch=branch)
-    
-    regulations = Regulation.objects.all()
+    if course_type:
+        courses = courses.filter(course_type=course_type)
+    if search:
+        courses = courses.filter(
+            Q(course_code__icontains=search) | Q(title__icontains=search)
+        )
     
     context = {
         'courses': courses,
-        'regulations': regulations,
+        'course_type_choices': Course.COURSE_TYPE_CHOICES,
         'page_title': 'Manage Courses'
     }
     return render(request, "hod_template/manage_course.html", context)
@@ -680,12 +701,17 @@ def add_academic_year(request):
 
 @login_required
 def manage_academic_year(request):
-    """Manage academic years"""
+    """Manage academic years with their semesters - unified view"""
     if not check_hod_permission(request.user):
         return redirect('/')
     
-    academic_years = AcademicYear.objects.all()
-    context = {'academic_years': academic_years, 'page_title': 'Manage Academic Years'}
+    academic_years = AcademicYear.objects.prefetch_related('semesters').all()
+    semester_form = SemesterForm()
+    context = {
+        'academic_years': academic_years,
+        'semester_form': semester_form,
+        'page_title': 'Manage Academic Years'
+    }
     return render(request, "hod_template/manage_session.html", context)
 
 
@@ -734,24 +760,76 @@ def delete_academic_year(request, year_id):
 # =============================================================================
 
 @login_required
-def add_semester(request):
-    """Add semester"""
+def add_semester(request, year_id=None):
+    """Add multiple semesters at once for an academic year"""
     if not check_hod_permission(request.user):
         return redirect('/')
     
-    form = SemesterForm(request.POST or None)
-    context = {'form': form, 'page_title': 'Add Semester'}
+    academic_year = None
+    
+    # If year_id provided, pre-select that academic year
+    if year_id:
+        academic_year = get_object_or_404(AcademicYear, id=year_id)
+    
+    # Get existing semesters for this academic year to show which are already added
+    existing_semesters = []
+    if academic_year:
+        existing_semesters = list(Semester.objects.filter(academic_year=academic_year).values_list('semester_number', flat=True))
+    
+    context = {
+        'academic_year': academic_year,
+        'academic_years': AcademicYear.objects.all().order_by('-year'),
+        'existing_semesters': existing_semesters,
+        'page_title': f'Add Semesters for {academic_year.year}' if academic_year else 'Add Semesters'
+    }
     
     if request.method == 'POST':
-        if form.is_valid():
-            try:
-                form.save()
-                messages.success(request, "Semester added successfully!")
-                return redirect(reverse('manage_semester'))
-            except Exception as e:
-                messages.error(request, f"Could not add: {str(e)}")
-        else:
-            messages.error(request, "Please fill all required fields correctly")
+        academic_year_id = request.POST.get('academic_year') or (academic_year.id if academic_year else None)
+        
+        if not academic_year_id:
+            messages.error(request, "Please select an academic year")
+            return render(request, "hod_template/add_semester.html", context)
+        
+        academic_year_obj = get_object_or_404(AcademicYear, id=academic_year_id)
+        
+        # Get all semester data from POST
+        semester_numbers = request.POST.getlist('semester_number[]')
+        start_dates = request.POST.getlist('start_date[]')
+        end_dates = request.POST.getlist('end_date[]')
+        
+        created_count = 0
+        errors = []
+        
+        for i in range(len(semester_numbers)):
+            sem_num = semester_numbers[i]
+            start_date = start_dates[i] if i < len(start_dates) else ''
+            end_date = end_dates[i] if i < len(end_dates) else ''
+            
+            if sem_num and start_date and end_date:
+                try:
+                    # Check if semester already exists
+                    if Semester.objects.filter(academic_year=academic_year_obj, semester_number=sem_num).exists():
+                        errors.append(f"Semester {sem_num} already exists for {academic_year_obj.year}")
+                        continue
+                    
+                    Semester.objects.create(
+                        academic_year=academic_year_obj,
+                        semester_number=int(sem_num),
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                    created_count += 1
+                except Exception as e:
+                    errors.append(f"Error creating Semester {sem_num}: {str(e)}")
+        
+        if created_count > 0:
+            messages.success(request, f"Successfully created {created_count} semester(s)!")
+        
+        for error in errors:
+            messages.warning(request, error)
+        
+        if created_count > 0:
+            return redirect(reverse('manage_academic_year'))
     
     return render(request, "hod_template/add_semester.html", context)
 
@@ -780,22 +858,105 @@ def delete_semester(request, semester_id):
     except Exception as e:
         messages.error(request, f"Could not delete: {str(e)}")
     
-    return redirect(reverse('manage_semester'))
+    return redirect(reverse('manage_academic_year'))
+
+
+@login_required
+def edit_semester(request, semester_id):
+    """Edit an existing semester"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    semester = get_object_or_404(Semester, id=semester_id)
+    academic_year = semester.academic_year
+    
+    if request.method == 'POST':
+        semester_number = request.POST.get('semester_number')
+        start_date = request.POST.get('start_date')
+        end_date = request.POST.get('end_date')
+        
+        try:
+            # Check if another semester with this number exists (excluding current)
+            if Semester.objects.filter(
+                academic_year=academic_year, 
+                semester_number=semester_number
+            ).exclude(id=semester_id).exists():
+                messages.error(request, f"Semester {semester_number} already exists for {academic_year.year}")
+            else:
+                semester.semester_number = int(semester_number)
+                semester.start_date = start_date
+                semester.end_date = end_date
+                semester.save()
+                messages.success(request, f"Semester {semester_number} updated successfully!")
+                return redirect(reverse('manage_academic_year'))
+        except Exception as e:
+            messages.error(request, f"Error updating semester: {str(e)}")
+    
+    # Get existing semester numbers for this year (excluding current)
+    existing_semesters = list(
+        Semester.objects.filter(academic_year=academic_year)
+        .exclude(id=semester_id)
+        .values_list('semester_number', flat=True)
+    )
+    
+    context = {
+        'semester': semester,
+        'academic_year': academic_year,
+        'existing_semesters': existing_semesters,
+        'page_title': f'Edit Semester {semester.semester_number} for {academic_year.year}'
+    }
+    return render(request, "hod_template/edit_semester.html", context)
 
 
 @login_required
 def add_regulation(request):
-    """Add regulation"""
+    """Add regulation with course categories"""
     if not check_hod_permission(request.user):
         return redirect('/')
     
     form = RegulationForm(request.POST or None)
-    context = {'form': form, 'page_title': 'Add Regulation'}
+    course_category_choices = CourseCategory.CATEGORY_CHOICES
+    
+    # Default: select all categories for new regulation
+    all_category_codes = [code for code, label in course_category_choices]
+    
+    if request.method == 'POST':
+        selected_categories = request.POST.getlist('course_categories', [])
+    else:
+        # Pre-select all categories by default
+        selected_categories = all_category_codes
+    
+    context = {
+        'form': form, 
+        'page_title': 'Add Regulation',
+        'course_category_choices': course_category_choices,
+        'selected_categories': selected_categories,
+    }
     
     if request.method == 'POST':
         if form.is_valid():
             try:
-                form.save()
+                regulation = form.save()
+                # Save selected predefined course categories
+                for cat_code in selected_categories:
+                    CourseCategory.objects.create(
+                        regulation=regulation,
+                        code=cat_code,
+                        is_active=True
+                    )
+                
+                # Save custom categories
+                custom_codes = request.POST.getlist('custom_cat_codes', [])
+                custom_descs = request.POST.getlist('custom_cat_descs', [])
+                for code, desc in zip(custom_codes, custom_descs):
+                    if code and desc:
+                        CourseCategory.objects.create(
+                            regulation=regulation,
+                            code=code.upper(),
+                            description=desc,
+                            is_active=True
+                        )
+                
                 messages.success(request, "Regulation added successfully!")
                 return redirect(reverse('manage_regulation'))
             except Exception as e:
@@ -812,9 +973,1231 @@ def manage_regulation(request):
     if not check_hod_permission(request.user):
         return redirect('/')
     
-    regulations = Regulation.objects.all()
+    regulations = Regulation.objects.prefetch_related('course_categories').all()
     context = {'regulations': regulations, 'page_title': 'Manage Regulations'}
     return render(request, "hod_template/manage_regulation.html", context)
+
+
+@login_required
+def edit_regulation(request, regulation_id):
+    """Edit regulation with course categories"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    regulation = get_object_or_404(Regulation, id=regulation_id)
+    form = RegulationForm(request.POST or None, instance=regulation)
+    course_category_choices = CourseCategory.CATEGORY_CHOICES
+    predefined_codes = [code for code, label in course_category_choices]
+    
+    # Get currently selected predefined categories
+    existing_predefined = list(regulation.course_categories.filter(code__in=predefined_codes).values_list('code', flat=True))
+    # Get existing custom categories (not in predefined list)
+    existing_custom_categories = regulation.course_categories.exclude(code__in=predefined_codes)
+    
+    if request.method == 'POST':
+        selected_categories = request.POST.getlist('course_categories', [])
+    else:
+        selected_categories = existing_predefined
+    
+    context = {
+        'form': form, 
+        'page_title': 'Edit Regulation',
+        'regulation': regulation,
+        'course_category_choices': course_category_choices,
+        'selected_categories': selected_categories,
+        'existing_custom_categories': existing_custom_categories,
+    }
+    
+    if request.method == 'POST':
+        if form.is_valid():
+            try:
+                form.save()
+                # Remove all predefined categories
+                regulation.course_categories.filter(code__in=predefined_codes).delete()
+                
+                # Add selected predefined categories
+                for cat_code in request.POST.getlist('course_categories', []):
+                    CourseCategory.objects.create(
+                        regulation=regulation,
+                        code=cat_code,
+                        is_active=True
+                    )
+                
+                # Handle existing custom categories - keep checked ones, delete unchecked
+                kept_custom_ids = request.POST.getlist('existing_custom_cats', [])
+                regulation.course_categories.exclude(code__in=predefined_codes).exclude(id__in=kept_custom_ids).delete()
+                
+                # Add new custom categories
+                custom_codes = request.POST.getlist('custom_cat_codes', [])
+                custom_descs = request.POST.getlist('custom_cat_descs', [])
+                for code, desc in zip(custom_codes, custom_descs):
+                    if code and desc:
+                        CourseCategory.objects.create(
+                            regulation=regulation,
+                            code=code.upper(),
+                            description=desc,
+                            is_active=True
+                        )
+                
+                messages.success(request, "Regulation updated successfully!")
+                return redirect(reverse('manage_regulation'))
+            except Exception as e:
+                messages.error(request, f"Could not update: {str(e)}")
+        else:
+            messages.error(request, "Please fill all required fields correctly")
+    
+    return render(request, "hod_template/edit_regulation.html", context)
+
+
+@login_required
+def delete_regulation(request, regulation_id):
+    """Delete regulation"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    try:
+        regulation = get_object_or_404(Regulation, id=regulation_id)
+        regulation.delete()
+        messages.success(request, "Regulation deleted successfully!")
+    except Exception as e:
+        messages.error(request, f"Could not delete: {str(e)}")
+    
+    return redirect(reverse('manage_regulation'))
+
+
+# =============================================================================
+# REGULATION COURSE PLAN MANAGEMENT
+# =============================================================================
+
+@login_required
+def manage_regulation_courses(request, regulation_id):
+    """Manage course plan for a specific regulation"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    regulation = get_object_or_404(Regulation, id=regulation_id)
+    
+    # Get all course plans for this regulation, grouped by semester and branch
+    course_plans = RegulationCoursePlan.objects.filter(
+        regulation=regulation
+    ).select_related('course', 'category').order_by('semester', 'branch', 'course__course_code')
+    
+    # Group by semester, then by branch
+    plans_by_semester = {}
+    for plan in course_plans:
+        if plan.semester not in plans_by_semester:
+            plans_by_semester[plan.semester] = {}
+        if plan.branch not in plans_by_semester[plan.semester]:
+            plans_by_semester[plan.semester][plan.branch] = []
+        plans_by_semester[plan.semester][plan.branch].append(plan)
+    
+    # Get all available courses (universal, not tied to regulation)
+    available_courses = Course.objects.all().order_by('course_code')
+    
+    # Get programs from database, grouped by level
+    all_programs = Program.objects.all().order_by('level', 'code')
+    program_levels = Program.PROGRAM_LEVEL_CHOICES
+    
+    context = {
+        'page_title': f'Course Plan - {regulation}',
+        'regulation': regulation,
+        'plans_by_semester': dict(sorted(plans_by_semester.items())),
+        'available_courses': available_courses,
+        'all_programs': all_programs,
+        'program_levels': program_levels,
+        'semesters': range(1, 9),
+    }
+    return render(request, 'hod_template/manage_regulation_courses.html', context)
+
+
+@login_required
+def add_regulation_course(request, regulation_id):
+    """Add a course to regulation course plan"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    regulation = get_object_or_404(Regulation, id=regulation_id)
+    
+    if request.method == 'POST':
+        course_code = request.POST.get('course_code')
+        category_id = request.POST.get('category')
+        semester = request.POST.get('semester')
+        branch = request.POST.get('branch')
+        program_type = request.POST.get('program_type', 'UG')
+        is_elective = request.POST.get('is_elective') == 'on'
+        
+        try:
+            course = Course.objects.get(course_code=course_code)
+            category = CourseCategory.objects.get(id=category_id) if category_id else None
+            
+            # Check if already exists
+            if RegulationCoursePlan.objects.filter(
+                regulation=regulation,
+                course=course,
+                branch=branch,
+                program_type=program_type
+            ).exists():
+                messages.warning(request, f"Course {course_code} already exists in the plan for {branch} {program_type}")
+            else:
+                RegulationCoursePlan.objects.create(
+                    regulation=regulation,
+                    course=course,
+                    category=category,
+                    semester=int(semester),
+                    branch=branch,
+                    program_type=program_type,
+                    is_elective=is_elective
+                )
+                messages.success(request, f"Course {course_code} added to Semester {semester} for {branch}")
+        except Course.DoesNotExist:
+            messages.error(request, f"Course {course_code} not found")
+        except Exception as e:
+            messages.error(request, f"Error adding course: {str(e)}")
+    
+    return redirect('manage_regulation_courses', regulation_id=regulation_id)
+
+
+@login_required
+def remove_regulation_course(request, plan_id):
+    """Remove a course from regulation course plan"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    plan = get_object_or_404(RegulationCoursePlan, id=plan_id)
+    regulation_id = plan.regulation.id
+    course_code = plan.course.course_code
+    
+    try:
+        plan.delete()
+        messages.success(request, f"Course {course_code} removed from course plan")
+    except Exception as e:
+        messages.error(request, f"Error removing course: {str(e)}")
+    
+    return redirect('manage_regulation_courses', regulation_id=regulation_id)
+
+
+@login_required
+def bulk_add_regulation_courses(request, regulation_id):
+    """Bulk add courses to a semester in regulation course plan"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    regulation = get_object_or_404(Regulation, id=regulation_id)
+    
+    if request.method == 'POST':
+        semester = int(request.POST.get('semester'))
+        branch = request.POST.get('branch')
+        program_type = request.POST.get('program_type', 'UG')
+        
+        # Get all courses for this regulation that are defined for this semester
+        courses = Course.objects.filter(regulation=regulation, semester=semester, branch=branch)
+        
+        added_count = 0
+        for course in courses:
+            if not RegulationCoursePlan.objects.filter(
+                regulation=regulation,
+                course=course,
+                branch=branch,
+                program_type=program_type
+            ).exists():
+                RegulationCoursePlan.objects.create(
+                    regulation=regulation,
+                    course=course,
+                    semester=semester,
+                    branch=branch,
+                    program_type=program_type,
+                    is_elective=False
+                )
+                added_count += 1
+        
+        if added_count > 0:
+            messages.success(request, f"Added {added_count} courses to Semester {semester} for {branch}")
+        else:
+            messages.info(request, f"No new courses to add for Semester {semester} {branch}")
+    
+    return redirect('manage_regulation_courses', regulation_id=regulation_id)
+
+
+@login_required
+def api_get_programs_by_level(request):
+    """API endpoint to get programs filtered by level (UG/PG/PHD)"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    level = request.GET.get('level', '').strip().upper()
+    
+    programs = Program.objects.all()
+    
+    if level:
+        programs = programs.filter(level=level)
+    
+    programs = programs.order_by('code')
+    
+    data = [{
+        'code': p.code,
+        'name': p.name,
+        'full_name': p.full_name,
+        'level': p.level,
+        'degree': p.degree,
+        'specialization': p.specialization or ''
+    } for p in programs]
+    
+    return JsonResponse({'programs': data})
+
+
+@login_required
+def api_get_semester_courses(request, regulation_id):
+    """API endpoint to get courses for a specific semester in a regulation"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    regulation = get_object_or_404(Regulation, id=regulation_id)
+    semester = request.GET.get('semester')
+    program_type = request.GET.get('program_type', 'UG')
+    branch = request.GET.get('branch', '')
+    
+    plans = RegulationCoursePlan.objects.filter(
+        regulation=regulation,
+        semester=semester,
+        program_type=program_type,
+        branch=branch
+    ).select_related('course', 'category', 'elective_vertical')
+    
+    data = [{
+        'plan_id': p.id,
+        'course_code': p.course.course_code,
+        'title': p.course.title,
+        'credits': p.course.credits,
+        'ltp': p.course.ltp_display if not p.course.is_placeholder else '-',
+        'category': p.category.code if p.category else None,
+        'is_elective': p.is_elective,
+        'elective_vertical': p.elective_vertical.name if p.elective_vertical else None,
+        'elective_vertical_id': p.elective_vertical.id if p.elective_vertical else None,
+        'is_placeholder': p.course.is_placeholder,
+        'placeholder_type': p.course.placeholder_type if p.course.is_placeholder else None
+    } for p in plans]
+    
+    return JsonResponse({'courses': data})
+
+
+@login_required
+@csrf_exempt
+def api_add_regulation_course(request, regulation_id):
+    """API endpoint to add a course to regulation plan"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    regulation = get_object_or_404(Regulation, id=regulation_id)
+    
+    course_code = request.POST.get('course_code', '').strip()
+    semester = request.POST.get('semester')
+    category_id = request.POST.get('category')
+    program_type = request.POST.get('program_type', 'UG')
+    branch = request.POST.get('branch', '')
+    is_elective = request.POST.get('is_elective') == '1'
+    elective_vertical_id = request.POST.get('elective_vertical', '').strip() or None
+    auto_placeholder = request.POST.get('auto_placeholder') == '1'  # New flag for auto-assign
+    
+    try:
+        category = CourseCategory.objects.get(id=category_id) if category_id else None
+        
+        # Auto-detect elective based on category
+        elective_categories = ['PEC', 'OEC', 'ETC', 'SDC', 'SLC', 'IOC', 'AC', 'NCC', 'HON', 'MIN']
+        if category and category.code in elective_categories:
+            is_elective = True
+        
+        # Auto-assign placeholder course if requested
+        if auto_placeholder and category and category.code in elective_categories:
+            # Find how many of this type are already in the regulation (across all semesters)
+            existing_count = RegulationCoursePlan.objects.filter(
+                regulation=regulation,
+                program_type=program_type,
+                branch=branch,
+                course__is_placeholder=True,
+                course__placeholder_type=category.code
+            ).count()
+            
+            next_slot = existing_count + 1
+            
+            # Get or create the placeholder course for this slot
+            course, created = Course.get_or_create_placeholder(category.code, next_slot)
+            if not course:
+                return JsonResponse({
+                    'success': False, 
+                    'error': f'Could not create placeholder for {category.code} slot {next_slot}'
+                })
+        else:
+            # Regular course lookup
+            if not course_code:
+                return JsonResponse({'success': False, 'error': 'Please select a course'})
+            try:
+                course = Course.objects.get(course_code=course_code)
+            except Course.DoesNotExist:
+                return JsonResponse({'success': False, 'error': f'Course "{course_code}" not found'})
+        
+        # Get elective vertical object if provided
+        elective_vertical = None
+        if is_elective and elective_vertical_id:
+            try:
+                elective_vertical = ElectiveVertical.objects.get(id=elective_vertical_id, regulation=regulation)
+            except ElectiveVertical.DoesNotExist:
+                pass  # Vertical not found, leave as None
+        
+        # Check if this exact course already exists in this semester
+        existing = RegulationCoursePlan.objects.filter(
+            regulation=regulation,
+            course=course,
+            semester=semester,
+            program_type=program_type,
+            branch=branch
+        ).exists()
+        
+        if existing:
+            return JsonResponse({
+                'success': False, 
+                'error': f'{course.course_code} is already added to Semester {semester}'
+            })
+        
+        RegulationCoursePlan.objects.create(
+            regulation=regulation,
+            course=course,
+            semester=semester,
+            category=category,
+            program_type=program_type,
+            branch=branch,
+            is_elective=is_elective,
+            elective_vertical=elective_vertical
+        )
+        
+        return JsonResponse({
+            'success': True,
+            'course_code': course.course_code,
+            'course_title': course.title
+        })
+    except CourseCategory.DoesNotExist:
+        return JsonResponse({'success': False, 'error': 'Invalid category selected'})
+    except Exception as e:
+        return JsonResponse({'success': False, 'error': str(e)})
+
+
+@login_required
+@csrf_exempt
+def api_remove_regulation_course(request):
+    """API endpoint to remove a course from regulation plan"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    plan_id = request.POST.get('plan_id')
+    
+    try:
+        plan = RegulationCoursePlan.objects.get(id=plan_id)
+        plan.delete()
+        return JsonResponse({'success': True})
+    except RegulationCoursePlan.DoesNotExist:
+        return JsonResponse({'success': False, 'error': 'Course plan not found'})
+    except Exception as e:
+        return JsonResponse({'success': False, 'error': str(e)})
+
+
+@login_required
+def api_search_courses(request):
+    """API endpoint to search courses for dropdown"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    query = request.GET.get('q', '').strip()
+    limit = int(request.GET.get('limit', 20))
+    include_placeholders = request.GET.get('include_placeholders', 'true').lower() == 'true'
+    placeholders_only = request.GET.get('placeholders_only', 'false').lower() == 'true'
+    placeholder_type = request.GET.get('placeholder_type', '')
+    
+    courses = Course.objects.all()
+    
+    # Filter by placeholder status
+    if placeholders_only:
+        courses = courses.filter(is_placeholder=True)
+        if placeholder_type:
+            courses = courses.filter(placeholder_type=placeholder_type)
+    elif not include_placeholders:
+        courses = courses.filter(is_placeholder=False)
+    
+    if query:
+        courses = courses.filter(
+            Q(course_code__icontains=query) | Q(title__icontains=query)
+        )
+    
+    # Order placeholders by slot number, others by course code
+    courses = courses.order_by('-is_placeholder', 'placeholder_type', 'slot_number', 'course_code')[:limit]
+    
+    data = [{
+        'course_code': c.course_code,
+        'title': c.title,
+        'credits': c.credits,
+        'course_type': c.course_type,
+        'ltp': c.ltp_display,
+        'is_placeholder': c.is_placeholder,
+        'placeholder_type': c.placeholder_type,
+        'slot_number': c.slot_number,
+        'display': f"{c.course_code} - {c.title}" + (" (Placeholder)" if c.is_placeholder else f" ({c.ltp_display}, {c.credits} cr)")
+    } for c in courses]
+    
+    return JsonResponse({'courses': data})
+
+
+@login_required
+def api_get_placeholder_courses(request):
+    """API endpoint to get placeholder courses by type"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    placeholder_type = request.GET.get('type', '')
+    
+    courses = Course.objects.filter(is_placeholder=True)
+    if placeholder_type:
+        courses = courses.filter(placeholder_type=placeholder_type)
+    
+    courses = courses.order_by('placeholder_type', 'slot_number')
+    
+    data = [{
+        'course_code': c.course_code,
+        'title': c.title,
+        'credits': c.credits,
+        'placeholder_type': c.placeholder_type,
+        'slot_number': c.slot_number,
+    } for c in courses]
+    
+    return JsonResponse({'placeholders': data})
+
+
+# =============================================================================
+# ELECTIVE COURSE OFFERINGS APIs
+# =============================================================================
+
+@login_required
+def api_get_elective_offerings(request):
+    """API endpoint to get elective offerings for a regulation course plan"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    plan_id = request.GET.get('plan_id')
+    
+    if not plan_id:
+        return JsonResponse({'error': 'plan_id required'}, status=400)
+    
+    offerings = ElectiveCourseOffering.objects.filter(
+        regulation_course_plan_id=plan_id
+    ).select_related('actual_course', 'elective_vertical')
+    
+    data = [{
+        'id': o.id,
+        'course_code': o.actual_course.course_code,
+        'course_title': o.actual_course.title,
+        'batch_count': o.batch_count,
+        'capacity_per_batch': o.capacity_per_batch,
+        'vertical': o.elective_vertical.name if o.elective_vertical else None,
+    } for o in offerings]
+    
+    return JsonResponse({'offerings': data})
+
+
+@login_required
+@csrf_exempt
+def api_add_elective_offering(request):
+    """API endpoint to add an elective course offering"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    plan_id = request.POST.get('plan_id')
+    course_code = request.POST.get('course_code')
+    batch_count = request.POST.get('batch_count', 1)
+    capacity_per_batch = request.POST.get('capacity_per_batch', 30)
+    faculty_id = request.POST.get('faculty_id', '').strip() or None
+    semester_id = request.POST.get('semester_id')
+    
+    try:
+        plan = RegulationCoursePlan.objects.get(id=plan_id)
+        course = Course.objects.get(course_code=course_code)
+        semester = Semester.objects.get(id=semester_id) if semester_id else None
+        
+        # Check if this course is already offered for this plan
+        existing = ElectiveCourseOffering.objects.filter(
+            regulation_course_plan=plan,
+            actual_course=course,
+            semester=semester
+        ).exists()
+        
+        if existing:
+            return JsonResponse({
+                'success': False,
+                'error': f'{course.course_code} is already offered for this slot'
+            })
+        
+        ElectiveCourseOffering.objects.create(
+            regulation_course_plan=plan,
+            semester=semester,
+            actual_course=course,
+            batch_count=int(batch_count),
+            capacity_per_batch=int(capacity_per_batch),
+            elective_vertical=plan.elective_vertical
+        )
+        
+        return JsonResponse({'success': True})
+    except RegulationCoursePlan.DoesNotExist:
+        return JsonResponse({'success': False, 'error': 'Invalid plan ID'})
+    except Course.DoesNotExist:
+        return JsonResponse({'success': False, 'error': 'Course not found'})
+    except Exception as e:
+        return JsonResponse({'success': False, 'error': str(e)})
+
+
+@login_required
+@csrf_exempt
+def api_remove_elective_offering(request):
+    """API endpoint to remove an elective course offering"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    offering_id = request.POST.get('offering_id')
+    
+    try:
+        offering = ElectiveCourseOffering.objects.get(id=offering_id)
+        offering.delete()
+        return JsonResponse({'success': True})
+    except ElectiveCourseOffering.DoesNotExist:
+        return JsonResponse({'success': False, 'error': 'Offering not found'})
+    except Exception as e:
+        return JsonResponse({'success': False, 'error': str(e)})
+
+
+# =============================================================================
+# ELECTIVE VERTICAL MANAGEMENT APIs
+# =============================================================================
+
+@login_required
+def api_get_elective_verticals(request, regulation_id):
+    """API endpoint to get all elective verticals for a regulation"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    regulation = get_object_or_404(Regulation, id=regulation_id)
+    
+    verticals = ElectiveVertical.objects.filter(
+        regulation=regulation,
+        is_active=True
+    ).order_by('name')
+    
+    data = [{
+        'id': v.id,
+        'name': v.name,
+        'description': v.description or '',
+        'course_count': v.course_plans.count()
+    } for v in verticals]
+    
+    return JsonResponse({'verticals': data})
+
+
+@login_required
+@csrf_exempt
+def api_add_elective_vertical(request, regulation_id):
+    """API endpoint to add a new elective vertical to a regulation"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    regulation = get_object_or_404(Regulation, id=regulation_id)
+    
+    name = request.POST.get('name', '').strip()
+    description = request.POST.get('description', '').strip() or None
+    
+    if not name:
+        return JsonResponse({'success': False, 'error': 'Vertical name is required'})
+    
+    # Check if already exists
+    if ElectiveVertical.objects.filter(regulation=regulation, name__iexact=name).exists():
+        return JsonResponse({'success': False, 'error': 'A vertical with this name already exists'})
+    
+    try:
+        vertical = ElectiveVertical.objects.create(
+            regulation=regulation,
+            name=name,
+            description=description
+        )
+        return JsonResponse({
+            'success': True,
+            'vertical': {
+                'id': vertical.id,
+                'name': vertical.name,
+                'description': vertical.description or ''
+            }
+        })
+    except Exception as e:
+        return JsonResponse({'success': False, 'error': str(e)})
+
+
+@login_required
+@csrf_exempt
+def api_edit_elective_vertical(request, vertical_id):
+    """API endpoint to edit an elective vertical"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    vertical = get_object_or_404(ElectiveVertical, id=vertical_id)
+    
+    name = request.POST.get('name', '').strip()
+    description = request.POST.get('description', '').strip() or None
+    
+    if not name:
+        return JsonResponse({'success': False, 'error': 'Vertical name is required'})
+    
+    # Check if name already exists (excluding current vertical)
+    if ElectiveVertical.objects.filter(
+        regulation=vertical.regulation, 
+        name__iexact=name
+    ).exclude(id=vertical_id).exists():
+        return JsonResponse({'success': False, 'error': 'A vertical with this name already exists'})
+    
+    try:
+        vertical.name = name
+        vertical.description = description
+        vertical.save()
+        return JsonResponse({
+            'success': True,
+            'vertical': {
+                'id': vertical.id,
+                'name': vertical.name,
+                'description': vertical.description or ''
+            }
+        })
+    except Exception as e:
+        return JsonResponse({'success': False, 'error': str(e)})
+
+
+@login_required
+@csrf_exempt
+def api_delete_elective_vertical(request, vertical_id):
+    """API endpoint to delete an elective vertical"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    vertical = get_object_or_404(ElectiveVertical, id=vertical_id)
+    
+    # Check if any courses are using this vertical
+    course_count = vertical.course_plans.count()
+    if course_count > 0:
+        return JsonResponse({
+            'success': False, 
+            'error': f'Cannot delete: {course_count} course(s) are assigned to this vertical'
+        })
+    
+    try:
+        vertical.delete()
+        return JsonResponse({'success': True})
+    except Exception as e:
+        return JsonResponse({'success': False, 'error': str(e)})
+
+
+# =============================================================================
+# SEMESTER COURSE ASSIGNMENT (for specific academic semester)
+# =============================================================================
+
+@login_required
+def semester_course_assignment(request):
+    """
+    Assign courses for a specific semester with pre-fill from regulation course plan.
+    Shows courses based on student's regulation.
+    """
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    from django.utils import timezone
+    
+    # Get active/upcoming semesters
+    current_academic_year = AcademicYear.get_current()
+    semesters = Semester.objects.filter(
+        academic_year=current_academic_year
+    ).order_by('semester_number') if current_academic_year else Semester.objects.none()
+    
+    # Get filter parameters
+    selected_semester = request.GET.get('semester_id')
+    selected_branch = request.GET.get('branch', '')
+    selected_batch = request.GET.get('batch')
+    selected_program = request.GET.get('program_type', 'UG')
+    
+    # Get programs from database for dynamic branch selection
+    all_programs = Program.objects.all().order_by('level', 'code')
+    program_levels = Program.PROGRAM_LEVEL_CHOICES
+    
+    # Get branches filtered by selected program type
+    filtered_programs = all_programs.filter(level=selected_program) if selected_program else all_programs
+    
+    # Set default branch if not selected
+    if not selected_branch and filtered_programs.exists():
+        selected_branch = filtered_programs.first().code
+    
+    # Get batch choices from database
+    if current_academic_year:
+        batch_choices = list(ProgramBatch.objects.filter(
+            academic_year=current_academic_year,
+            is_active=True
+        ).values_list('batch_name', 'batch_display').distinct().order_by('batch_name'))
+    else:
+        batch_choices = []
+    
+    # Get all regulations for manual selection
+    all_regulations = Regulation.objects.all().order_by('-year', 'name')
+    selected_regulation_id = request.GET.get('regulation_id', '')
+    
+    context = {
+        'page_title': 'Semester Course Assignment',
+        'semesters': semesters,
+        'all_programs': all_programs,
+        'program_levels': program_levels,
+        'filtered_programs': filtered_programs,
+        'batch_choices': batch_choices,
+        'selected_semester': selected_semester,
+        'selected_branch': selected_branch,
+        'selected_batch': selected_batch,
+        'selected_program': selected_program,
+        'academic_year': current_academic_year,
+        'course_plans': [],
+        'existing_assignments': [],
+        'faculty_list': Faculty_Profile.objects.select_related('user').filter(user__is_active=True),
+        'all_regulations': all_regulations,
+        'selected_regulation_id': selected_regulation_id,
+    }
+    
+    if selected_semester and selected_branch:
+        semester_obj = get_object_or_404(Semester, id=selected_semester)
+        context['semester_obj'] = semester_obj
+        
+        # Determine which regulation applies to students in this semester
+        # Find students in this semester number with this branch
+        students_in_sem = Student_Profile.objects.filter(
+            current_sem=semester_obj.semester_number,
+            branch=selected_branch,
+            status='ACTIVE'
+        )
+        if selected_batch:
+            students_in_sem = students_in_sem.filter(batch_label=selected_batch)
+        if selected_program:
+            students_in_sem = students_in_sem.filter(program_type=selected_program)
+        
+        # Get the most common regulation among these students
+        regulation = None
+        student_count = students_in_sem.count()
+        
+        if students_in_sem.exists():
+            from django.db.models import Count
+            reg_counts = students_in_sem.values('regulation').annotate(
+                count=Count('regulation')
+            ).order_by('-count')
+            if reg_counts and reg_counts[0]['regulation']:
+                regulation = Regulation.objects.get(id=reg_counts[0]['regulation'])
+        
+        # If no students or no regulation detected, allow manual selection
+        if not regulation and selected_regulation_id:
+            try:
+                regulation = Regulation.objects.get(id=selected_regulation_id)
+            except Regulation.DoesNotExist:
+                pass
+        
+        context['regulation'] = regulation
+        context['student_count'] = student_count
+        context['needs_regulation_selection'] = (student_count == 0 and not regulation)
+        
+        # Get course plan from regulation
+        if regulation:
+            course_plans = RegulationCoursePlan.objects.filter(
+                regulation=regulation,
+                semester=semester_obj.semester_number,
+                branch=selected_branch,
+                program_type=selected_program
+            ).select_related('course', 'category', 'elective_vertical')
+            
+            # Separate core and elective courses for better display
+            core_courses = [p for p in course_plans if not p.is_elective]
+            elective_courses = [p for p in course_plans if p.is_elective]
+            
+            context['course_plans'] = course_plans
+            context['core_courses'] = core_courses
+            context['elective_courses'] = elective_courses
+            
+            # Get elective offerings for placeholder courses
+            elective_offerings = ElectiveCourseOffering.objects.filter(
+                regulation_course_plan__in=course_plans,
+                semester=semester_obj
+            ).select_related('actual_course', 'elective_vertical')
+            
+            # Create a map of plan_id to offerings
+            elective_offerings_map = {}
+            for offering in elective_offerings:
+                plan_id = offering.regulation_course_plan_id
+                if plan_id not in elective_offerings_map:
+                    elective_offerings_map[plan_id] = []
+                elective_offerings_map[plan_id].append(offering)
+            context['elective_offerings_map'] = elective_offerings_map
+        
+        # Get existing course assignments for this semester
+        existing_filter = {
+            'semester': semester_obj,
+            'academic_year': current_academic_year,
+        }
+        if selected_batch:
+            existing_filter['batch_label'] = selected_batch
+        
+        existing_assignments = Course_Assignment.objects.filter(
+            **existing_filter
+        ).select_related('course', 'faculty', 'faculty__user')
+        context['existing_assignments'] = existing_assignments
+        
+        # Create a dict for quick lookup in template
+        assignments_by_course = {}
+        for assign in existing_assignments:
+            code = assign.course.course_code
+            if code not in assignments_by_course:
+                assignments_by_course[code] = []
+            assignments_by_course[code].append(assign)
+        context['assignments_by_course'] = assignments_by_course
+    
+    return render(request, 'hod_template/semester_course_assignment.html', context)
+
+
+@login_required
+def create_course_assignments(request):
+    """Create course assignments from semester course assignment page"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    if request.method == 'POST':
+        semester_id = request.POST.get('semester_id')
+        academic_year_id = request.POST.get('academic_year_id')
+        
+        semester_obj = get_object_or_404(Semester, id=semester_id)
+        academic_year = get_object_or_404(AcademicYear, id=academic_year_id)
+        
+        # Process each course assignment
+        course_codes = request.POST.getlist('course_code[]')
+        faculty_ids = request.POST.getlist('faculty_id[]')
+        batch_labels = request.POST.getlist('batch_label[]')
+        
+        created_count = 0
+        errors = []
+        
+        for i, course_code in enumerate(course_codes):
+            if not course_code:
+                continue
+                
+            faculty_id = faculty_ids[i] if i < len(faculty_ids) else None
+            batch_label = batch_labels[i] if i < len(batch_labels) else None
+            
+            if not faculty_id or not batch_label:
+                continue
+            
+            try:
+                course = Course.objects.get(course_code=course_code)
+                faculty = Faculty_Profile.objects.get(id=faculty_id)
+                
+                # Check if assignment already exists
+                if not Course_Assignment.objects.filter(
+                    course=course,
+                    batch_label=batch_label,
+                    academic_year=academic_year,
+                    semester=semester_obj
+                ).exists():
+                    Course_Assignment.objects.create(
+                        course=course,
+                        faculty=faculty,
+                        batch_label=batch_label,
+                        academic_year=academic_year,
+                        semester=semester_obj,
+                        is_active=True
+                    )
+                    created_count += 1
+            except Exception as e:
+                errors.append(f"Error for {course_code}: {str(e)}")
+        
+        if created_count > 0:
+            messages.success(request, f"Created {created_count} course assignment(s)")
+        if errors:
+            messages.warning(request, f"Some errors occurred: {'; '.join(errors[:3])}")
+        
+        # Redirect back with same filters
+        return redirect(f"{reverse('semester_course_assignment')}?semester_id={semester_id}&branch={request.POST.get('branch', 'CSE')}&batch={request.POST.get('batch', '')}&program_type={request.POST.get('program_type', 'UG')}")
+    
+    return redirect('semester_course_assignment')
+
+
+# =============================================================================
+# PROGRAM BATCH MANAGEMENT
+# =============================================================================
+
+@login_required
+def manage_program_batches(request, year_id=None):
+    """Manage classroom batches for programs in an academic year"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    academic_years = AcademicYear.objects.all().order_by('-year')
+    
+    # Select academic year
+    if year_id:
+        selected_year = get_object_or_404(AcademicYear, id=year_id)
+    else:
+        selected_year = AcademicYear.get_current() or academic_years.first()
+    
+    # Get all programs
+    programs = Program.objects.all().order_by('level', 'code')
+    
+    # Get Year 1 batches for the selected year, grouped by program
+    year1_batches = []
+    if selected_year:
+        batches = ProgramBatch.objects.filter(
+            academic_year=selected_year,
+            year_of_study=1  # Only Year 1 batches
+        ).select_related('program').order_by('program__level', 'program__code', 'batch_name')
+        
+        # Group batches by program
+        batches_by_program = {}
+        for batch in batches:
+            if batch.program.code not in batches_by_program:
+                # Check if students exist for this program's Year 1
+                has_students = ProgramBatch.has_students(selected_year, batch.program, 1)
+                batches_by_program[batch.program.code] = {
+                    'program': batch.program,
+                    'batches': [],
+                    'has_students': has_students,
+                }
+            batches_by_program[batch.program.code]['batches'].append(batch)
+        
+        year1_batches = list(batches_by_program.values())
+    
+    # Get previous year for copy option
+    previous_year = None
+    if selected_year:
+        try:
+            start_year = int(selected_year.year.split('-')[0])
+            prev_year_str = f"{start_year - 1}-{str(start_year)[-2:]}"
+            previous_year = AcademicYear.objects.filter(year=prev_year_str).first()
+        except:
+            pass
+    
+    # Check which programs don't have Year 1 batches configured
+    programs_without_batches = []
+    for program in programs:
+        has_year1 = ProgramBatch.objects.filter(
+            academic_year=selected_year,
+            program=program,
+            year_of_study=1,
+            is_active=True
+        ).exists() if selected_year else False
+        if not has_year1:
+            programs_without_batches.append(program)
+    
+    context = {
+        'page_title': 'Manage Program Batches',
+        'academic_years': academic_years,
+        'selected_year': selected_year,
+        'programs': programs,
+        'year1_batches': year1_batches,
+        'previous_year': previous_year,
+        'programs_without_batches': programs_without_batches,
+    }
+    return render(request, 'hod_template/manage_program_batches.html', context)
+
+
+@login_required
+def add_program_batch(request):
+    """Add a new batch for a program"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    if request.method == 'POST':
+        year_id = request.POST.get('academic_year')
+        program_id = request.POST.get('program')
+        year_of_study = request.POST.get('year_of_study')
+        batch_names = request.POST.get('batch_names', '').strip()  # Comma-separated
+        capacity = request.POST.get('capacity', 60)
+        
+        if not all([year_id, program_id, year_of_study, batch_names]):
+            messages.error(request, "All fields are required")
+            return redirect('manage_program_batches', year_id=year_id)
+        
+        academic_year = get_object_or_404(AcademicYear, id=year_id)
+        program = get_object_or_404(Program, id=program_id)
+        
+        # Parse batch names (comma or space separated)
+        import re
+        batch_list = re.split(r'[,\s]+', batch_names.upper())
+        batch_list = [b.strip() for b in batch_list if b.strip()]
+        
+        created_count = 0
+        skipped_count = 0
+        
+        for batch_name in batch_list:
+            _, was_created = ProgramBatch.objects.get_or_create(
+                academic_year=academic_year,
+                program=program,
+                year_of_study=int(year_of_study),
+                batch_name=batch_name,
+                defaults={
+                    'batch_display': f"{batch_name} Section",
+                    'capacity': int(capacity),
+                    'is_active': True
+                }
+            )
+            if was_created:
+                created_count += 1
+            else:
+                skipped_count += 1
+        
+        if created_count:
+            messages.success(request, f"Added {created_count} batch(es) for {program.code} Year {year_of_study}")
+        if skipped_count:
+            messages.info(request, f"{skipped_count} batch(es) already existed")
+        
+        return redirect('manage_program_batches_year', year_id=year_id)
+    
+    return redirect('manage_program_batches')
+
+
+@login_required
+def copy_batches_from_previous_year(request):
+    """Copy batch configuration from previous academic year"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    if request.method == 'POST':
+        source_year_id = request.POST.get('source_year')
+        target_year_id = request.POST.get('target_year')
+        program_id = request.POST.get('program')  # Optional - if None, copy all
+        
+        if not all([source_year_id, target_year_id]):
+            messages.error(request, "Source and target years are required")
+            return redirect('manage_program_batches')
+        
+        source_year = get_object_or_404(AcademicYear, id=source_year_id)
+        target_year = get_object_or_404(AcademicYear, id=target_year_id)
+        program = Program.objects.filter(id=program_id).first() if program_id else None
+        
+        created, skipped = ProgramBatch.copy_from_previous_year(source_year, target_year, program)
+        
+        if created:
+            messages.success(request, f"Copied {created} batch(es) from {source_year} to {target_year}")
+        if skipped:
+            messages.info(request, f"{skipped} batch(es) already existed")
+        if not created and not skipped:
+            messages.warning(request, f"No batches found to copy from {source_year}")
+        
+        return redirect('manage_program_batches_year', year_id=target_year_id)
+    
+    return redirect('manage_program_batches')
+
+
+@login_required
+def delete_program_batch(request, batch_id):
+    """Delete a program batch"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    batch = get_object_or_404(ProgramBatch, id=batch_id)
+    year_id = batch.academic_year.id
+    
+    # Check if any students are assigned to this batch
+    student_count = Student_Profile.objects.filter(
+        branch=batch.program.code,
+        batch_label=batch.batch_name
+    ).count()
+    
+    if student_count > 0:
+        messages.error(request, f"Cannot delete batch {batch.batch_name} - {student_count} student(s) assigned")
+    else:
+        batch.delete()
+        messages.success(request, f"Batch {batch.batch_name} deleted successfully")
+    
+    return redirect('manage_program_batches_year', year_id=year_id)
+
+
+@login_required
+def initialize_default_batches(request, year_id, program_id):
+    """Initialize default batches for a program from its default settings"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    academic_year = get_object_or_404(AcademicYear, id=year_id)
+    program = get_object_or_404(Program, id=program_id)
+    
+    # Only allow for Year 1 and if no students exist
+    has_students = ProgramBatch.has_students(academic_year, program, 1)
+    if has_students:
+        messages.error(request, f"Cannot initialize batches - students already assigned to {program.code}")
+        return redirect('manage_program_batches_year', year_id=year_id)
+    
+    # Create default batches
+    created_count, created_names = ProgramBatch.create_default_batches(
+        academic_year=academic_year,
+        program=program,
+        year_of_study=1,
+        capacity=60
+    )
+    
+    if created_count:
+        messages.success(request, f"Created {created_count} batch(es) for {program.code}: {', '.join(created_names)}")
+    else:
+        messages.info(request, f"Batches already exist for {program.code}")
+    
+    return redirect('manage_program_batches_year', year_id=year_id)
+
+
+@login_required
+def api_get_batches(request):
+    """API endpoint to get batches filtered by program, year, and academic year"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    academic_year_id = request.GET.get('academic_year')
+    program_code = request.GET.get('program')
+    year_of_study = request.GET.get('year_of_study')
+    
+    # Get academic year
+    if academic_year_id:
+        academic_year = AcademicYear.objects.filter(id=academic_year_id).first()
+    else:
+        academic_year = AcademicYear.get_current()
+    
+    if not academic_year:
+        return JsonResponse({'batches': []})
+    
+    # Build query
+    qs = ProgramBatch.objects.filter(academic_year=academic_year, is_active=True)
+    
+    if program_code:
+        qs = qs.filter(program__code=program_code)
+    if year_of_study:
+        qs = qs.filter(year_of_study=int(year_of_study))
+    
+    batches = list(qs.values('id', 'batch_name', 'batch_display', 'capacity', 'year_of_study').order_by('batch_name'))
+    
+    return JsonResponse({'batches': batches})
 
 
 # =============================================================================
@@ -839,7 +2222,14 @@ def add_program(request):
             except Exception as e:
                 messages.error(request, f"Could not add: {str(e)}")
         else:
-            messages.error(request, "Please fill all required fields correctly")
+            # Show specific field errors
+            for field, errors in form.errors.items():
+                for error in errors:
+                    if field == '__all__':
+                        messages.error(request, error)
+                    else:
+                        field_label = form.fields[field].label or field.replace('_', ' ').title()
+                        messages.error(request, f"{field_label}: {error}")
     
     return render(request, "hod_template/add_program.html", context)
 
@@ -863,7 +2253,16 @@ def edit_program(request, program_id):
     
     program = get_object_or_404(Program, id=program_id)
     form = ProgramForm(request.POST or None, instance=program)
-    context = {'form': form, 'program': program, 'page_title': f'Edit Program - {program.code}'}
+    
+    # Get actual student count using branch field (stores program code)
+    student_count = Student_Profile.objects.filter(branch=program.code).count()
+    
+    context = {
+        'form': form, 
+        'program': program, 
+        'student_count': student_count,
+        'page_title': f'Edit Program - {program.code}'
+    }
     
     if request.method == 'POST':
         if form.is_valid():
@@ -1606,11 +3005,20 @@ def manage_timetables(request):
     
     academic_years = AcademicYear.objects.all().order_by('-start_date')
     
+    # Get batch choices from database
+    current_year = AcademicYear.get_current()
+    if current_year:
+        batch_choices = list(ProgramBatch.objects.filter(
+            academic_year=current_year
+        ).values_list('batch_name', 'batch_display').distinct())
+    else:
+        batch_choices = []
+    
     context = {
         'timetables': timetables,
         'academic_years': academic_years,
         'year_choices': Timetable.YEAR_CHOICES,
-        'batch_choices': Timetable.BATCH_CHOICES,
+        'batch_choices': batch_choices,
         'page_title': 'Manage Timetables'
     }
     return render(request, 'hod_template/manage_timetables.html', context)
@@ -1957,6 +3365,25 @@ def bulk_upload_students(request):
         messages.error(request, "Access Denied. HOD privileges required.")
         return redirect('/')
     
+    # Get current academic year and configured batches
+    current_year = AcademicYear.get_current()
+    configured_batches = {}  # {program_code: [batch_names]}
+    programs_without_batches = []
+    
+    if current_year:
+        # Get all programs and their configured batches for Year 1
+        for program in Program.objects.all():
+            batches = ProgramBatch.objects.filter(
+                academic_year=current_year,
+                program=program,
+                year_of_study=1,
+                is_active=True
+            ).values_list('batch_name', flat=True)
+            if batches:
+                configured_batches[program.code] = list(batches)
+            else:
+                programs_without_batches.append(program.code)
+    
     if request.method == 'POST':
         csv_file = request.FILES.get('csv_file')
         
@@ -2027,13 +3454,23 @@ def bulk_upload_students(request):
                         error_count += 1
                         continue
                     
-                    if batch not in ['N', 'P', 'Q']:
-                        errors.append(f"Row {row_num}: Batch must be N, P, or Q")
+                    # Validate branch exists in database
+                    valid_branches = list(Program.objects.values_list('code', flat=True))
+                    if branch not in valid_branches:
+                        errors.append(f"Row {row_num}: Branch '{branch}' not found. Valid options: {', '.join(valid_branches)}")
                         error_count += 1
                         continue
                     
-                    if branch not in ['CSE', 'AIML', 'CSBS']:
-                        errors.append(f"Row {row_num}: Branch must be CSE, AIML, or CSBS")
+                    # Check if batches are configured for this branch
+                    if branch not in configured_batches:
+                        errors.append(f"Row {row_num}: No batches configured for {branch}. Please configure batches in 'Manage Batches' first.")
+                        error_count += 1
+                        continue
+                    
+                    # Validate batch against configured batches for this branch
+                    valid_batches = configured_batches[branch]
+                    if batch not in valid_batches:
+                        errors.append(f"Row {row_num}: Batch '{batch}' not valid for {branch}. Configured batches: {', '.join(valid_batches)}")
                         error_count += 1
                         continue
                     
@@ -2052,39 +3489,50 @@ def bulk_upload_students(request):
                         error_count += 1
                         continue
                     
-                    # Create user with unusable password (forces password setup)
-                    user = Account_User.objects.create(
-                        email=email,
-                        full_name=full_name,
-                        gender=gender,
-                        phone=phone or None,
-                        address=address or None,
-                        role='STUDENT',
-                        is_active=True
-                    )
-                    user.set_unusable_password()  # User must set password via email
-                    user.save()
-                    
-                    # Update student profile (auto-created by signal)
-                    student = user.student_profile
-                    student.register_no = register_no
-                    student.batch_label = batch
-                    student.branch = branch
-                    student.program_type = program_type
-                    student.admission_year = int(admission_year)
-                    student.current_sem = int(current_sem) if current_sem else 1
-                    student.parent_name = parent_name or None
-                    student.parent_phone = parent_phone or None
-                    student.save()
-                    
-                    created_students.append({
-                        'user': user,
-                        'email': email,
-                        'name': full_name,
-                        'college_email': student.college_email,
-                        'register_no': register_no
-                    })
-                    success_count += 1
+                    # Use transaction to rollback if any step fails
+                    with transaction.atomic():
+                        # Create user with unusable password (forces password setup)
+                        user = Account_User.objects.create(
+                            email=email,
+                            full_name=full_name,
+                            gender=gender,
+                            phone=phone or None,
+                            address=address or None,
+                            role='STUDENT',
+                            is_active=True
+                        )
+                        user.set_unusable_password()  # User must set password via email
+                        user.save()
+                        
+                        # Update student profile (auto-created by signal)
+                        student = user.student_profile
+                        student.register_no = register_no
+                        student.batch_label = batch
+                        student.branch = branch
+                        student.program_type = program_type
+                        student.admission_year = int(admission_year)
+                        student.current_sem = int(current_sem) if current_sem else 1
+                        student.parent_name = parent_name or None
+                        student.parent_phone = parent_phone or None
+                        
+                        # Auto-assign regulation based on admission year
+                        # Find the regulation that applies to this admission year (latest regulation year <= admission year)
+                        regulation = Regulation.objects.filter(
+                            year__lte=int(admission_year)
+                        ).order_by('-year').first()
+                        if regulation:
+                            student.regulation = regulation
+                        
+                        student.save()
+                        
+                        created_students.append({
+                            'user': user,
+                            'email': email,
+                            'name': full_name,
+                            'college_email': student.college_email,
+                            'register_no': register_no
+                        })
+                        success_count += 1
                     
                 except Exception as e:
                     errors.append(f"Row {row_num}: {str(e)}")
@@ -2122,7 +3570,10 @@ def bulk_upload_students(request):
             return redirect('bulk_upload_students')
     
     context = {
-        'page_title': 'Bulk Upload Students'
+        'page_title': 'Bulk Upload Students',
+        'current_year': current_year,
+        'configured_batches': configured_batches,
+        'programs_without_batches': programs_without_batches,
     }
     return render(request, 'hod_template/bulk_upload_students.html', context)
 
@@ -2432,7 +3883,7 @@ def get_students_for_promotion(request):
     
     students = Student_Profile.objects.filter(
         current_sem=int(semester),
-        is_graduated=False
+        status='ACTIVE'
     ).select_related('user').order_by('register_no')
     
     data = [{
@@ -2445,3 +3896,128 @@ def get_students_for_promotion(request):
     } for s in students]
     
     return JsonResponse({'students': data})
+
+
+@login_required
+def bulk_promote_semester(request):
+    """
+    Bulk promotion for all students in a semester after its end date.
+    - Odd Sem (1,3,5,7) → Next Sem (same year of study initially, then changes)
+    - Even Sem (2,4,6,8) → Next Sem (year of study changes)
+    - 8th Sem students → Marked as GRADUATED
+    """
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    from django.utils import timezone
+    from django.db import transaction
+    today = timezone.now().date()
+    
+    # Get semesters that have ended (eligible for promotion)
+    completed_semesters = Semester.objects.filter(
+        end_date__lt=today
+    ).select_related('academic_year').order_by('-end_date')
+    
+    # Get student counts per semester
+    semester_data = []
+    for sem in completed_semesters:
+        student_count = Student_Profile.objects.filter(
+            current_sem=sem.semester_number,
+            status='ACTIVE'
+        ).count()
+        
+        # Check if promotion already done for this semester
+        already_promoted = SemesterPromotion.objects.filter(
+            from_semester=sem.semester_number,
+            academic_year=sem.academic_year
+        ).exists()
+        
+        if student_count > 0 or already_promoted:
+            semester_data.append({
+                'semester': sem,
+                'student_count': student_count,
+                'already_promoted': already_promoted,
+                'is_final_sem': sem.semester_number == 8,
+                'next_sem': sem.semester_number + 1 if sem.semester_number < 8 else None,
+                'current_year': (sem.semester_number + 1) // 2,
+                'next_year': (sem.semester_number + 2) // 2 if sem.semester_number < 8 else None,
+            })
+    
+    if request.method == 'POST':
+        semester_id = request.POST.get('semester_id')
+        action = request.POST.get('action', 'promote')  # 'promote' or 'graduate'
+        
+        semester_obj = get_object_or_404(Semester, id=semester_id)
+        
+        # Verify semester has ended
+        if semester_obj.end_date >= today:
+            messages.error(request, f"Cannot promote - Semester {semester_obj.semester_number} hasn't ended yet (ends {semester_obj.end_date})")
+            return redirect('bulk_promote_semester')
+        
+        with transaction.atomic():
+            students = Student_Profile.objects.filter(
+                current_sem=semester_obj.semester_number,
+                status='ACTIVE'
+            )
+            
+            promoted_count = 0
+            graduated_count = 0
+            
+            for student in students:
+                old_sem = student.current_sem
+                old_year = student.year_of_study
+                
+                if old_sem == 8:
+                    # Final semester - Graduate the student
+                    student.status = 'GRADUATED'
+                    student.graduation_year = today.year
+                    student.save()
+                    
+                    # Log the graduation
+                    SemesterPromotion.objects.create(
+                        student=student,
+                        from_semester=old_sem,
+                        to_semester=old_sem,  # Stays at 8
+                        from_year=old_year,
+                        to_year=old_year,
+                        academic_year=semester_obj.academic_year,
+                        promotion_type='BULK',
+                        promoted_by=request.user,
+                        remarks=f"Graduated - Completed 8th semester"
+                    )
+                    graduated_count += 1
+                else:
+                    # Promote to next semester
+                    student.current_sem = old_sem + 1
+                    student.save()
+                    
+                    # Log the promotion
+                    SemesterPromotion.objects.create(
+                        student=student,
+                        from_semester=old_sem,
+                        to_semester=student.current_sem,
+                        from_year=old_year,
+                        to_year=student.year_of_study,
+                        academic_year=semester_obj.academic_year,
+                        promotion_type='BULK',
+                        promoted_by=request.user,
+                        remarks=f"Bulk promoted after Sem {old_sem} completion"
+                    )
+                    promoted_count += 1
+            
+            if promoted_count > 0:
+                messages.success(request, f"Successfully promoted {promoted_count} student(s) from Semester {semester_obj.semester_number} to Semester {semester_obj.semester_number + 1}")
+            if graduated_count > 0:
+                messages.success(request, f"Congratulations! {graduated_count} student(s) have graduated (completed 8th semester)")
+            
+            if promoted_count == 0 and graduated_count == 0:
+                messages.info(request, "No students found to promote in this semester")
+        
+        return redirect('bulk_promote_semester')
+    
+    context = {
+        'page_title': 'Bulk Semester Promotion',
+        'semester_data': semester_data,
+        'today': today,
+    }
+    return render(request, 'hod_template/bulk_promote.html', context)

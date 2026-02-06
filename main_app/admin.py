@@ -1,12 +1,12 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from .models import (
-    Account_User, Regulation, AcademicYear, Semester,
+    Account_User, Regulation, CourseCategory, AcademicYear, Semester,
     Faculty_Profile, NonTeachingStaff_Profile, Student_Profile,
-    Course, Course_Assignment, Attendance,
+    Course, Course_Assignment, Attendance, RegulationCoursePlan,
     Publication, Student_Achievement, Lab_Issue_Log,
     LeaveRequest, Feedback, Event, EventRegistration,
-    Notification, Announcement
+    Notification, Announcement, ElectiveVertical, ElectiveCourseOffering
 )
 
 
@@ -40,23 +40,94 @@ class AccountUserAdmin(UserAdmin):
 # ACADEMIC STRUCTURE ADMINS
 # =============================================================================
 
+class CourseCategoryInline(admin.TabularInline):
+    """Inline to add course categories directly in Regulation admin"""
+    model = CourseCategory
+    extra = 1
+    fields = ('code', 'description', 'is_active')
+
+
+class ElectiveVerticalInline(admin.TabularInline):
+    """Inline to add elective verticals directly in Regulation admin"""
+    model = ElectiveVertical
+    extra = 1
+    fields = ('name', 'description', 'is_active')
+
+
 @admin.register(Regulation)
 class RegulationAdmin(admin.ModelAdmin):
-    list_display = ('year', 'name', 'is_active', 'effective_from')
-    list_filter = ('is_active',)
+    list_display = ('year', 'name', 'is_active', 'active_student_count', 'effective_from', 'get_categories', 'get_verticals')
     search_fields = ('year', 'name')
+    inlines = [CourseCategoryInline, ElectiveVerticalInline]
+    
+    def get_categories(self, obj):
+        """Display course categories for this regulation"""
+        categories = obj.course_categories.filter(is_active=True).values_list('code', flat=True)
+        return ', '.join(categories) if categories else '-'
+    get_categories.short_description = 'Course Categories'
+    
+    def get_verticals(self, obj):
+        """Display elective verticals for this regulation"""
+        verticals = obj.elective_verticals.filter(is_active=True).values_list('name', flat=True)
+        return ', '.join(verticals[:3]) + ('...' if len(verticals) > 3 else '') if verticals else '-'
+    get_verticals.short_description = 'Elective Verticals'
+
+
+@admin.register(ElectiveVertical)
+class ElectiveVerticalAdmin(admin.ModelAdmin):
+    list_display = ('name', 'regulation', 'description', 'course_count', 'is_active', 'created_at')
+    list_filter = ('regulation', 'is_active')
+    search_fields = ('name', 'description', 'regulation__year')
+    ordering = ['regulation', 'name']
+    
+    def course_count(self, obj):
+        """Display count of courses using this vertical"""
+        return obj.course_plans.count()
+    course_count.short_description = 'Courses'
+
+
+@admin.register(CourseCategory)
+class CourseCategoryAdmin(admin.ModelAdmin):
+    list_display = ('regulation', 'code', 'description', 'is_active')
+    list_filter = ('regulation', 'code', 'is_active')
+    search_fields = ('code', 'description')
+    ordering = ['regulation', 'code']
 
 
 @admin.register(AcademicYear)
 class AcademicYearAdmin(admin.ModelAdmin):
-    list_display = ('year', 'start_date', 'end_date', 'is_current')
-    list_filter = ('is_current',)
+    list_display = ('year', 'status_display', 'is_current_display', 'semester_count')
+    search_fields = ('year',)
+    
+    def status_display(self, obj):
+        status_text, status_class = obj.status_display
+        return status_text
+    status_display.short_description = 'Status'
+    
+    def is_current_display(self, obj):
+        return obj.is_current
+    is_current_display.short_description = 'Currently Running'
+    is_current_display.boolean = True
+    
+    def semester_count(self, obj):
+        return obj.semesters.count()
+    semester_count.short_description = 'Semesters'
 
 
 @admin.register(Semester)
 class SemesterAdmin(admin.ModelAdmin):
-    list_display = ('academic_year', 'semester_number', 'semester_type', 'is_current')
-    list_filter = ('academic_year', 'semester_type', 'is_current')
+    list_display = ('academic_year', 'semester_number', 'year_of_study_display', 'semester_type', 'start_date', 'end_date', 'is_current_display')
+    list_filter = ('academic_year', 'semester_number')
+    search_fields = ('academic_year__year',)
+    
+    def year_of_study_display(self, obj):
+        return obj.year_of_study_display
+    year_of_study_display.short_description = 'Year'
+    
+    def is_current_display(self, obj):
+        return obj.is_current
+    is_current_display.short_description = 'Current'
+    is_current_display.boolean = True
 
 
 # =============================================================================
@@ -93,9 +164,27 @@ class StudentProfileAdmin(admin.ModelAdmin):
 
 @admin.register(Course)
 class CourseAdmin(admin.ModelAdmin):
-    list_display = ('course_code', 'title', 'regulation', 'semester', 'credits', 'course_type', 'branch')
-    list_filter = ('regulation', 'semester', 'course_type', 'branch', 'is_lab')
+    list_display = ('course_code', 'title', 'course_type', 'ltp_display', 'credits', 'is_placeholder', 'placeholder_type')
+    list_filter = ('course_type', 'is_placeholder', 'placeholder_type')
     search_fields = ('course_code', 'title')
+    
+    def ltp_display(self, obj):
+        return obj.ltp_display
+    ltp_display.short_description = 'L-T-P'
+
+
+@admin.register(RegulationCoursePlan)
+class RegulationCoursePlanAdmin(admin.ModelAdmin):
+    list_display = ('regulation', 'course', 'category', 'semester', 'branch', 'program_type', 'is_elective', 'get_vertical_name')
+    list_filter = ('regulation', 'category', 'semester', 'branch', 'program_type', 'is_elective', 'elective_vertical')
+    search_fields = ('course__course_code', 'course__title', 'regulation__name', 'elective_vertical__name')
+    raw_id_fields = ('course',)
+    ordering = ['regulation', 'semester', 'branch', 'course__course_code']
+    
+    def get_vertical_name(self, obj):
+        """Display vertical name or dash if not set"""
+        return obj.elective_vertical.name if obj.elective_vertical else '-'
+    get_vertical_name.short_description = 'Vertical'
 
 
 @admin.register(Course_Assignment)
@@ -106,6 +195,22 @@ class CourseAssignmentAdmin(admin.ModelAdmin):
     raw_id_fields = ('course', 'faculty')
 
 
+@admin.register(ElectiveCourseOffering)
+class ElectiveCourseOfferingAdmin(admin.ModelAdmin):
+    list_display = ('semester', 'get_placeholder', 'actual_course', 'batch_count', 'capacity_per_batch', 'total_capacity', 'is_active')
+    list_filter = ('semester', 'is_active', 'regulation_course_plan__course__placeholder_type')
+    search_fields = ('actual_course__course_code', 'actual_course__title', 'regulation_course_plan__course__title')
+    raw_id_fields = ('actual_course', 'regulation_course_plan')
+    
+    def get_placeholder(self, obj):
+        return obj.regulation_course_plan.course.title if obj.regulation_course_plan.course else '-'
+    get_placeholder.short_description = 'Placeholder Slot'
+    
+    def total_capacity(self, obj):
+        return obj.total_capacity
+    total_capacity.short_description = 'Total Capacity'
+
+
 @admin.register(Attendance)
 class AttendanceAdmin(admin.ModelAdmin):
     list_display = ('student', 'assignment', 'date', 'period', 'status')
@@ -113,6 +218,7 @@ class AttendanceAdmin(admin.ModelAdmin):
     search_fields = ('student__register_no', 'student__user__full_name')
     date_hierarchy = 'date'
     raw_id_fields = ('student', 'assignment', 'marked_by')
+
 
 
 # =============================================================================

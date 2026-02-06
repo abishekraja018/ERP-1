@@ -1,0 +1,173 @@
+{% extends 'main_app/base.html' %}
+{% load static %}
+{% block page_title %}{{page_title}}{% endblock page_title %}
+
+{% block content %}
+<!-- Flatpickr CSS -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+<style>
+.flatpickr-calendar {
+    background: #fff;
+    box-shadow: 0 3px 13px rgba(0,0,0,0.3);
+    border-radius: 8px;
+}
+.flatpickr-day.selected, .flatpickr-day.selected:hover {
+    background: #3699ff;
+    border-color: #3699ff;
+}
+.flatpickr-day:hover {
+    background: #e6e6e6;
+}
+.semester-info {
+    color: #3699ff;
+    font-weight: 500;
+}
+</style>
+
+<section class="content">
+    <div class="container-fluid">
+        <div class="row">
+            <div class="col-md-8 offset-md-2">
+                <div class="card card-warning">
+                    <div class="card-header">
+                        <h3 class="card-title"><i class="fas fa-edit"></i> {{page_title}}</h3>
+                    </div>
+                    <form method="POST" id="editSemesterForm">
+                        {% csrf_token %}
+                        <div class="card-body">
+                            
+                            <div class="alert alert-info">
+                                <i class="fas fa-info-circle"></i>
+                                Editing semester for: <strong>{{ academic_year.year }}</strong>
+                            </div>
+
+                            <div class="form-group">
+                                <label>Semester Number <span class="text-danger">*</span></label>
+                                <select name="semester_number" id="semester_number" class="form-control" required>
+                                    {% for i in "12345678" %}
+                                    <option value="{{ forloop.counter }}" 
+                                        {% if forloop.counter == semester.semester_number %}selected{% endif %}
+                                        {% if forloop.counter in existing_semesters %}disabled{% endif %}>
+                                        Semester {{ forloop.counter }}
+                                        {% if forloop.counter in existing_semesters %} (Already exists){% endif %}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                <small class="semester-info" id="semesterInfo"></small>
+                            </div>
+
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="form-group">
+                                        <label>Start Date <span class="text-danger">*</span></label>
+                                        <input type="text" name="start_date" id="start_date" 
+                                               class="form-control" placeholder="Select start date" 
+                                               value="{{ semester.start_date|date:'Y-m-d' }}" required readonly>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="form-group">
+                                        <label>End Date <span class="text-danger">*</span></label>
+                                        <input type="text" name="end_date" id="end_date" 
+                                               class="form-control" placeholder="Select end date" 
+                                               value="{{ semester.end_date|date:'Y-m-d' }}" required readonly>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="callout callout-secondary">
+                                <small>
+                                    <strong>Current Status:</strong> 
+                                    {% with semester.status_display as status %}
+                                    <span class="badge badge-{{ status.1 }}">{{ status.0 }}</span>
+                                    {% endwith %}
+                                    <br>
+                                    <strong>Year of Study:</strong> {{ semester.year_of_study_display }}
+                                    <br>
+                                    <strong>Type:</strong> {{ semester.semester_type_display }}
+                                </small>
+                            </div>
+                        </div>
+
+                        <div class="card-footer">
+                            <button type="submit" class="btn btn-warning">
+                                <i class="fas fa-save"></i> Update Semester
+                            </button>
+                            <a href="{% url 'manage_academic_year' %}" class="btn btn-secondary">
+                                <i class="fas fa-arrow-left"></i> Back to Academic Years
+                            </a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Flatpickr JS -->
+<script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    var academicYearText = '{{ academic_year.year }}';
+    
+    function getAcademicYearRange() {
+        if (academicYearText && academicYearText.indexOf('-') > -1) {
+            var parts = academicYearText.split('-');
+            var startYear = parseInt(parts[0]);
+            var endYear = startYear + 1;
+            return {
+                startYear: startYear,
+                endYear: endYear,
+                minDate: startYear + '-01-01',
+                maxDate: endYear + '-12-31'
+            };
+        }
+        return null;
+    }
+    
+    function getYearSuffix(num) {
+        var suffixes = {1: '1st', 2: '2nd', 3: '3rd', 4: '4th'};
+        return suffixes[num] || num + 'th';
+    }
+    
+    function updateSemesterInfo() {
+        var semNum = parseInt(document.getElementById('semester_number').value);
+        var infoEl = document.getElementById('semesterInfo');
+        if (semNum) {
+            var yearOfStudy = Math.ceil(semNum / 2);
+            var semType = (semNum % 2 === 1) ? 'Odd' : 'Even';
+            infoEl.innerHTML = '<strong>' + getYearSuffix(yearOfStudy) + ' Year</strong> | ' + semType + ' Semester';
+        } else {
+            infoEl.innerHTML = '';
+        }
+    }
+    
+    // Initialize date pickers
+    var range = getAcademicYearRange();
+    var pickerConfig = {
+        dateFormat: 'Y-m-d',
+        altInput: true,
+        altFormat: 'd M Y',
+        allowInput: false
+    };
+    
+    if (range) {
+        pickerConfig.minDate = range.minDate;
+        pickerConfig.maxDate = range.maxDate;
+    }
+    
+    var endPicker = flatpickr('#end_date', pickerConfig);
+    var startPicker = flatpickr('#start_date', Object.assign({}, pickerConfig, {
+        onChange: function(selectedDates) {
+            if (selectedDates[0]) {
+                endPicker.set('minDate', selectedDates[0]);
+            }
+        }
+    }));
+    
+    // Update semester info on change
+    document.getElementById('semester_number').addEventListener('change', updateSemesterInfo);
+    updateSemesterInfo();
+});
+</script>
+{% endblock content %}

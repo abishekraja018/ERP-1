@@ -29,6 +29,59 @@ class Regulation(models.Model):
 
 
 # =============================================================================
+# COURSE CATEGORY
+# =============================================================================
+
+class CourseCategory(models.Model):
+    """
+    Course Categories available under a Regulation.
+    Examples:
+    - PCC: Professional Core Course
+    - ESC: Engineering Science Course
+    - PEC: Professional Elective Course
+    - HSMC: Humanities Science and Management Course
+    - ETC: Emerging Technology Course
+    - SDC: Skill Development Course
+    - OEC: Open Elective Course
+    - UC: University Course
+    - SLC: Self Learning Course
+    """
+    
+    CATEGORY_CHOICES = [
+        ('PCC', 'Professional Core Course'),
+        ('ESC', 'Engineering Science Course'),
+        ('PEC', 'Professional Elective Course'),
+        ('HSMC', 'Humanities Science and Management Course'),
+        ('ETC', 'Emerging Technology Course'),
+        ('SDC', 'Skill Development Course'),
+        ('OEC', 'Open Elective Course'),
+        ('UC', 'University Course'),
+        ('SLC', 'Self Learning Course'),
+    ]
+    
+    regulation = models.ForeignKey(Regulation, on_delete=models.CASCADE, related_name='course_categories')
+    code = models.CharField(max_length=10, choices=CATEGORY_CHOICES, help_text="Course category code (e.g., PCC, ESC)")
+    description = models.CharField(max_length=200, blank=True, help_text="Custom description (optional, defaults to choice label)")
+    is_active = models.BooleanField(default=True)
+    
+    class Meta:
+        db_table = 'main_app_coursecategory'
+        unique_together = ('regulation', 'code')
+        ordering = ['regulation', 'code']
+        verbose_name = 'Course Category'
+        verbose_name_plural = 'Course Categories'
+    
+    def __str__(self):
+        return f"{self.regulation} - {self.code} ({self.get_code_display()})"
+    
+    def save(self, *args, **kwargs):
+        # Auto-fill description if not provided
+        if not self.description:
+            self.description = self.get_code_display()
+        super().save(*args, **kwargs)
+
+
+# =============================================================================
 # PROGRAM
 # =============================================================================
 
@@ -155,30 +208,29 @@ class Semester(models.Model):
 class Course(models.Model):
     """Course/Subject Master Table"""
     
+    # Course Types as per Anna University regulation
     COURSE_TYPE_CHOICES = [
-        ('THEORY', 'Theory'),
-        ('LAB', 'Laboratory'),
-        ('PROJECT', 'Project'),
-        ('SEMINAR', 'Seminar'),
-    ]
-    
-    BRANCH_CHOICES = [
-        ('CSE', 'Computer Science and Engineering'),
-        ('AIML', 'Artificial Intelligence and Machine Learning'),
-        ('CSBS', 'Computer Science and Business Systems'),
+        ('LIT', 'Laboratory Integrated Theory'),
+        ('T', 'Theory'),
+        ('L', 'Laboratory Course'),
+        ('IPW', 'Internship cum Project Work'),
+        ('PW', 'Project Work'),
+        ('CDP', 'Capstone Design Project'),
     ]
     
     course_code = models.CharField(max_length=10, primary_key=True)  # e.g., "CS3401"
     title = models.CharField(max_length=200)
     regulation = models.ForeignKey(Regulation, on_delete=models.CASCADE, related_name='courses')
-    course_type = models.CharField(max_length=10, choices=COURSE_TYPE_CHOICES, default='THEORY')
+    category = models.ForeignKey('CourseCategory', on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name='courses', help_text="Course category (PCC, ESC, PEC, etc.)")
+    course_type = models.CharField(max_length=10, choices=COURSE_TYPE_CHOICES, default='T')
     is_lab = models.BooleanField(default=False)
     credits = models.IntegerField(default=3, validators=[MinValueValidator(0), MaxValueValidator(10)])
     lecture_hours = models.IntegerField(default=3, validators=[MinValueValidator(0)])
     tutorial_hours = models.IntegerField(default=0, validators=[MinValueValidator(0)])
     practical_hours = models.IntegerField(default=0, validators=[MinValueValidator(0)])
     semester = models.IntegerField(default=1, validators=[MinValueValidator(1), MaxValueValidator(8)])
-    branch = models.CharField(max_length=10, choices=BRANCH_CHOICES, default='CSE')
+    branch = models.CharField(max_length=20, default='CSE', help_text="Program code from Program model")
     syllabus_file = models.FileField(upload_to='syllabus/', blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

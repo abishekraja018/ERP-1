@@ -37,3 +37,24 @@ def add_str(value, arg):
     Usage in template: {{ "hello"|add_str:"_world" }}
     """
     return str(value) + str(arg)
+
+@register.filter(name='get_assignments')
+def get_assignments(course_code, assignments_list):
+    """
+    Get assignments for a specific course code from a list of assignments.
+    Usage in template: {{ course_code|get_assignments:existing_assignments }}
+    """
+    if not assignments_list:
+        return []
+    return [a for a in assignments_list if a.course.course_code == course_code]
+
+
+@register.filter(name='get_elective_offerings')
+def get_elective_offerings(plan_id, offerings_map):
+    """
+    Get elective offerings for a plan from the offerings map.
+    Usage in template: {{ plan.id|get_elective_offerings:elective_offerings_map }}
+    """
+    if not offerings_map:
+        return []
+    return offerings_map.get(plan_id, [])

@@ -8,13 +8,14 @@ from django.forms.widgets import DateInput, TextInput, Select, Textarea
 from django.core.exceptions import ValidationError
 
 from .models import (
-    Account_User, Regulation, AcademicYear, Semester, Program,
+    Account_User, Regulation, CourseCategory, AcademicYear, Semester, Program, ProgramBatch,
     Faculty_Profile, NonTeachingStaff_Profile, Student_Profile,
     Course, Course_Assignment, Attendance,
     Publication, Student_Achievement, Lab_Issue_Log,
     LeaveRequest, Feedback, Event, EventRegistration,
     Notification, Announcement, QuestionPaperAssignment,
-    Timetable, TimetableEntry, TimeSlot
+    Timetable, TimetableEntry, TimeSlot,
+    PROGRAM_TYPE_CHOICES  # Module-level constant
 )
 
 
@@ -139,9 +140,9 @@ class StudentRegistrationForm(FormSettings):
     # Profile fields (required)
     register_no = forms.CharField(max_length=10, required=True, label='Register Number',
                                   help_text='10-digit register number (e.g., 2023103543)')
-    batch_label = forms.ChoiceField(choices=Student_Profile.BATCH_LABEL_CHOICES, label='Batch (Section)')
-    branch = forms.ChoiceField(choices=Student_Profile.BRANCH_CHOICES, label='Branch')
-    program_type = forms.ChoiceField(choices=Student_Profile.PROGRAM_TYPE_CHOICES, label='Program Type')
+    program_type = forms.ChoiceField(choices=PROGRAM_TYPE_CHOICES, label='Program Type')
+    branch = forms.ChoiceField(choices=[], label='Branch')  # Populated dynamically
+    batch_label = forms.ChoiceField(choices=[], label='Batch (Section)')  # Populated dynamically
     admission_year = forms.IntegerField(min_value=2000, max_value=2100, required=True, label='Admission Year')
     current_sem = forms.IntegerField(min_value=1, max_value=8, initial=1, label='Current Semester')
     
@@ -152,6 +153,25 @@ class StudentRegistrationForm(FormSettings):
         model = Student_Profile
         fields = ['register_no', 'batch_label', 'branch', 'program_type',
                   'current_sem', 'admission_year']
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Load branch choices from Program model
+        programs = Program.objects.all().order_by('level', 'code')
+        branch_choices = [(p.code, f"{p.code} - {p.name}" if not p.specialization else f"{p.code} - {p.specialization}") for p in programs]
+        self.fields['branch'].choices = branch_choices if branch_choices else [('', 'No programs available')]
+        
+        # Load batch choices from ProgramBatch model (all available batches)
+        current_year = AcademicYear.get_current()
+        if current_year:
+            batches = ProgramBatch.objects.filter(
+                academic_year=current_year,
+                is_active=True
+            ).values_list('batch_name', 'batch_display').distinct().order_by('batch_name')
+            batch_choices = list(batches)
+        else:
+            batch_choices = []
+        self.fields['batch_label'].choices = batch_choices if batch_choices else [('A', 'A Section')]
     
     def clean_email(self):
         email = self.cleaned_data['email'].lower()
@@ -250,7 +270,7 @@ class RegulationForm(FormSettings):
     
     class Meta:
         model = Regulation
-        fields = ['year', 'name', 'description', 'is_active', 'effective_from']
+        fields = ['year', 'name', 'description', 'effective_from']
         widgets = {
             'effective_from': DateInput(attrs={'type': 'date'}),
         }
@@ -262,39 +282,91 @@ class ProgramForm(FormSettings):
     class Meta:
         model = Program
         fields = ['code', 'name', 'degree', 'level', 'specialization', 
-                  'duration_years', 'total_semesters', 'regulations', 'is_active']
+                  'duration_years', 'total_semesters', 'default_batch_count', 
+                  'default_batch_labels', 'regulations']
         widgets = {
-            'regulations': forms.CheckboxSelectMultiple(),
+            'regulations': forms.CheckboxSelectMultiple(attrs={'class': 'list-unstyled'}),
         }
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields['specialization'].required = False
         self.fields['regulations'].required = False
+        # Make batch config optional - will use model defaults
+        self.fields['default_batch_count'].required = False
+        self.fields['default_batch_labels'].required = False
+        self.fields['default_batch_count'].widget = forms.HiddenInput()
+        self.fields['default_batch_labels'].widget = forms.HiddenInput()
+    
+    def clean(self):
+        cleaned_data = super().clean()
+        level = cleaned_data.get('level')
+        
+        # Set sensible defaults based on program level
+        if not cleaned_data.get('default_batch_count'):
+            cleaned_data['default_batch_count'] = 3 if level == 'UG' else 1
+        if not cleaned_data.get('default_batch_labels'):
+            if level == 'UG':
+                cleaned_data['default_batch_labels'] = 'N,P,Q'  # Default for UG
+            else:
+                cleaned_data['default_batch_labels'] = 'A'  # Default for PG
+        
+        return cleaned_data
 
 
 class AcademicYearForm(FormSettings):
-    """Form for Academic Year"""
+    """Form for Academic Year - Status is auto-determined from semester dates"""
+    
+    year = forms.ChoiceField(
+        choices=[],
+        widget=forms.Select(attrs={'class': 'form-control select2'}),
+        help_text="Select the academic year (e.g., 2025-26)"
+    )
     
     class Meta:
         model = AcademicYear
-        fields = ['year', 'start_date', 'end_date', 'is_current']
-        widgets = {
-            'start_date': DateInput(attrs={'type': 'date'}),
-            'end_date': DateInput(attrs={'type': 'date'}),
-        }
+        fields = ['year']  # Only year - status is auto-determined
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Generate year choices dynamically
+        self.fields['year'].choices = AcademicYear.generate_year_choices()
+        
+        # If editing, make sure current value is in choices
+        if self.instance and self.instance.pk:
+            current_year = self.instance.year
+            if current_year not in dict(self.fields['year'].choices):
+                self.fields['year'].choices.insert(0, (current_year, current_year))
 
 
 class SemesterForm(FormSettings):
-    """Form for Semester"""
+    """Form for Semester - Year of study is auto-calculated from semester number"""
     
     class Meta:
         model = Semester
-        fields = ['academic_year', 'semester_number', 'semester_type', 'start_date', 'end_date', 'is_current']
+        fields = ['academic_year', 'semester_number', 'start_date', 'end_date']
         widgets = {
-            'start_date': DateInput(attrs={'type': 'date'}),
-            'end_date': DateInput(attrs={'type': 'date'}),
+            'start_date': TextInput(attrs={'class': 'form-control datepicker', 'placeholder': 'Select start date'}),
+            'end_date': TextInput(attrs={'class': 'form-control datepicker', 'placeholder': 'Select end date'}),
+            'semester_number': Select(attrs={'class': 'form-control select2'}),
         }
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Filter academic years to only ACTIVE or UPCOMING ones
+        active_year_ids = [y.id for y in AcademicYear.get_active_years()]
+        self.fields['academic_year'].queryset = AcademicYear.objects.filter(id__in=active_year_ids)
+    
+    def clean(self):
+        cleaned_data = super().clean()
+        start_date = cleaned_data.get('start_date')
+        end_date = cleaned_data.get('end_date')
+        
+        if start_date and end_date:
+            if start_date >= end_date:
+                raise forms.ValidationError("End date must be after start date.")
+        
+        return cleaned_data
 
 
 # =============================================================================
@@ -302,13 +374,24 @@ class SemesterForm(FormSettings):
 # =============================================================================
 
 class CourseForm(FormSettings):
-    """Form for Course"""
+    """Form for Course - simplified without regulation/category/semester/branch"""
     
     class Meta:
         model = Course
-        fields = ['course_code', 'title', 'regulation', 'course_type', 'is_lab',
-                  'credits', 'lecture_hours', 'tutorial_hours', 'practical_hours',
-                  'semester', 'branch', 'syllabus_file']
+        fields = ['course_code', 'title', 'course_type', 'credits', 
+                  'lecture_hours', 'tutorial_hours', 'practical_hours', 'syllabus_file']
+        
+        widgets = {
+            'course_code': forms.TextInput(attrs={'placeholder': 'e.g., CS3401'}),
+            'title': forms.TextInput(attrs={'placeholder': 'e.g., Database Management Systems'}),
+        }
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Add help text for L-T-P fields
+        self.fields['lecture_hours'].label = 'Lecture Hours (L)'
+        self.fields['tutorial_hours'].label = 'Tutorial Hours (T)'
+        self.fields['practical_hours'].label = 'Practical Hours (P)'
 
 
 class CourseAssignmentForm(FormSettings):
@@ -511,12 +594,29 @@ class StudentSearchForm(forms.Form):
     
     register_no = forms.CharField(max_length=12, required=False)
     name = forms.CharField(max_length=200, required=False)
-    branch = forms.ChoiceField(choices=[('', 'All')] + list(Student_Profile.BRANCH_CHOICES), required=False)
-    batch_label = forms.ChoiceField(choices=[('', 'All')] + list(Student_Profile.BATCH_LABEL_CHOICES), required=False)
+    branch = forms.ChoiceField(choices=[], required=False)
+    batch_label = forms.ChoiceField(choices=[], required=False)
     current_sem = forms.IntegerField(min_value=1, max_value=8, required=False)
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Load branch choices from Program model
+        programs = Program.objects.all().order_by('level', 'code')
+        branch_choices = [('', 'All')] + [(p.code, p.code) for p in programs]
+        self.fields['branch'].choices = branch_choices
+        
+        # Load batch choices from ProgramBatch model
+        current_year = AcademicYear.get_current()
+        if current_year:
+            batches = ProgramBatch.objects.filter(
+                academic_year=current_year,
+                is_active=True
+            ).values_list('batch_name', 'batch_display').distinct().order_by('batch_name')
+            batch_choices = [('', 'All')] + list(batches)
+        else:
+            batch_choices = [('', 'All')]
+        self.fields['batch_label'].choices = batch_choices
+        
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
 
@@ -531,13 +631,22 @@ class AttendanceFilterForm(forms.Form):
     )
     start_date = forms.DateField(widget=DateInput(attrs={'type': 'date'}), required=False)
     end_date = forms.DateField(widget=DateInput(attrs={'type': 'date'}), required=False)
-    batch_label = forms.ChoiceField(
-        choices=[('', 'All')] + list(Student_Profile.BATCH_LABEL_CHOICES),
-        required=False
-    )
+    batch_label = forms.ChoiceField(choices=[], required=False)
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # Load batch choices from ProgramBatch model
+        current_year = AcademicYear.get_current()
+        if current_year:
+            batches = ProgramBatch.objects.filter(
+                academic_year=current_year,
+                is_active=True
+            ).values_list('batch_name', 'batch_display').distinct().order_by('batch_name')
+            batch_choices = [('', 'All')] + list(batches)
+        else:
+            batch_choices = [('', 'All')]
+        self.fields['batch_label'].choices = batch_choices
+        
         for field in self.fields.values():
             field.widget.attrs['class'] = 'form-control'
 

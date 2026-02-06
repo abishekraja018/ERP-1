@@ -70,17 +70,8 @@
                             
                             <div class="form-group">
                                 <label>Applicable Regulations</label>
-                                <div class="border p-3 rounded" style="max-height: 200px; overflow-y: auto;">
-                                    {{ form.regulations }}
-                                </div>
+                                {{ form.regulations }}
                                 <small class="text-muted">Select regulations under which this program is offered</small>
-                            </div>
-                            
-                            <div class="form-group">
-                                <div class="custom-control custom-checkbox">
-                                    {{ form.is_active }}
-                                    <label class="custom-control-label" for="id_is_active">Active Program</label>
-                                </div>
                             </div>
                         </div>
                         <div class="card-footer">
@@ -129,3 +120,34 @@
     }
 </style>
 {% endblock custom_css %}
+
+{% block custom_js %}
+<script>
+$(document).ready(function() {
+    // Auto-select level based on degree
+    $('#id_degree').on('change', function() {
+        var degree = $(this).val();
+        var levelSelect = $('#id_level');
+        var durationInput = $('#id_duration_years');
+        var semestersInput = $('#id_total_semesters');
+        
+        if (degree === 'BE' || degree === 'BTECH') {
+            // Undergraduate
+            levelSelect.val('UG');
+            durationInput.val(4);
+            semestersInput.val(8);
+        } else if (degree === 'ME' || degree === 'MTECH' || degree === 'MS') {
+            // Postgraduate
+            levelSelect.val('PG');
+            durationInput.val(2);
+            semestersInput.val(4);
+        }
+    });
+    
+    // Trigger on page load if degree is already selected
+    if ($('#id_degree').val()) {
+        $('#id_degree').trigger('change');
+    }
+});
+</script>
+{% endblock custom_js %}

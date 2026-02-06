@@ -68,16 +68,7 @@
                             
                             <div class="form-group">
                                 <label>Applicable Regulations</label>
-                                <div class="border p-3 rounded" style="max-height: 200px; overflow-y: auto;">
-                                    {{ form.regulations }}
-                                </div>
-                            </div>
-                            
-                            <div class="form-group">
-                                <div class="custom-control custom-checkbox">
-                                    {{ form.is_active }}
-                                    <label class="custom-control-label" for="id_is_active">Active Program</label>
-                                </div>
+                                {{ form.regulations }}
                             </div>
                         </div>
                         <div class="card-footer">
@@ -106,7 +97,7 @@
                             <dd>{{ program.created_at|date:"M d, Y" }}</dd>
                             
                             <dt>Students Enrolled:</dt>
-                            <dd>{{ program.students.count }} students</dd>
+                            <dd>{{ student_count }} student{{ student_count|pluralize }}</dd>
                         </dl>
                     </div>
                 </div>

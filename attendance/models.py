@@ -20,15 +20,11 @@ class Course_Assignment(models.Model):
     This is the key table for academic operations.
     """
     
-    BATCH_LABEL_CHOICES = [
-        ('N', 'N Section'),
-        ('P', 'P Section'),
-        ('Q', 'Q Section'),
-    ]
-    
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='assignments')
     faculty = models.ForeignKey(Faculty_Profile, on_delete=models.CASCADE, related_name='course_assignments')
-    batch_label = models.CharField(max_length=1, choices=BATCH_LABEL_CHOICES)
+    batch = models.ForeignKey('main_app.ProgramBatch', on_delete=models.SET_NULL, null=True, blank=True,
+                               related_name='course_assignments_attendance')
+    batch_label = models.CharField(max_length=10, blank=True, help_text="Legacy field - use batch ForeignKey")
     academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE)
     semester = models.ForeignKey(Semester, on_delete=models.CASCADE)
     is_active = models.BooleanField(default=True)
@@ -37,13 +33,20 @@ class Course_Assignment(models.Model):
     
     class Meta:
         db_table = 'main_app_course_assignment'
-        unique_together = ('course', 'batch_label', 'academic_year', 'semester')
         verbose_name = 'Course Assignment'
         verbose_name_plural = 'Course Assignments'
         ordering = ['-academic_year', 'course']
     
     def __str__(self):
-        return f"{self.course.course_code} - {self.faculty.user.full_name} ({self.batch_label})"
+        batch_display = self.batch.batch_name if self.batch else self.batch_label
+        return f"{self.course.course_code} - {self.faculty.user.full_name} ({batch_display})"
+    
+    @property
+    def batch_display(self):
+        """Display batch from ForeignKey or legacy batch_label"""
+        if self.batch:
+            return self.batch.batch_display
+        return self.batch_label or "No Batch"
 
 
 # =============================================================================

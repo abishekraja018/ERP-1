@@ -22,6 +22,17 @@ from datetime import datetime, timedelta
 
 
 # =============================================================================
+# SHARED CHOICES (Module Level - DRY principle)
+# =============================================================================
+
+PROGRAM_TYPE_CHOICES = [
+    ('UG', 'Undergraduate'),
+    ('PG', 'Postgraduate'),
+    ('PHD', 'Ph.D.'),
+]
+
+
+# =============================================================================
 # CUSTOM USER MANAGER
 # =============================================================================
 
@@ -145,7 +156,6 @@ class Regulation(models.Model):
     year = models.IntegerField(unique=True, validators=[MinValueValidator(2000), MaxValueValidator(2100)])
     name = models.CharField(max_length=100, blank=True)  # e.g., "R2021"
     description = models.TextField(blank=True, null=True)
-    is_active = models.BooleanField(default=True)
     effective_from = models.DateField(null=True, blank=True)
     
     class Meta:
@@ -153,6 +163,140 @@ class Regulation(models.Model):
     
     def __str__(self):
         return f"R{self.year}"
+    
+    @property
+    def is_active(self):
+        """A regulation is active if there are active students studying under it"""
+        return self.students.filter(status='ACTIVE').exists()
+    
+    @property
+    def active_student_count(self):
+        """Count of active students under this regulation"""
+        return self.students.filter(status='ACTIVE').count()
+
+
+class CourseCategory(models.Model):
+    """
+    Course Categories available under a Regulation.
+    Examples:
+    - PCC: Professional Core Course
+    - ESC: Engineering Science Course
+    - PEC: Professional Elective Course
+    - HSMC: Humanities Science and Management Course
+    - ETC: Emerging Technology Course
+    - SDC: Skill Development Course
+    - OEC: Open Elective Course
+    - UC: University Course
+    - SLC: Self Learning Course
+    """
+    
+    # Predefined choices (can be extended with custom categories)
+    CATEGORY_CHOICES = [
+        ('PCC', 'Professional Core Course'),
+        ('ESC', 'Engineering Science Course'),
+        ('PEC', 'Professional Elective Course'),
+        ('HSMC', 'Humanities Science and Management Course'),
+        ('ETC', 'Emerging Technology Course'),
+        ('SDC', 'Skill Development Course'),
+        ('OEC', 'Open Elective Course'),
+        ('UC', 'University Course'),
+        ('SLC', 'Self Learning Course'),
+    ]
+    
+    regulation = models.ForeignKey(Regulation, on_delete=models.CASCADE, related_name='course_categories')
+    code = models.CharField(max_length=10, help_text="Course category code (e.g., PCC, ESC, or custom)")
+    description = models.CharField(max_length=200, blank=True, help_text="Category description")
+    is_active = models.BooleanField(default=True)
+    
+    class Meta:
+        unique_together = ('regulation', 'code')
+        ordering = ['regulation', 'code']
+        verbose_name = 'Course Category'
+        verbose_name_plural = 'Course Categories'
+    
+    def __str__(self):
+        return f"{self.regulation} - {self.code} ({self.description})"
+    
+    def get_code_display(self):
+        """Return description for the code (works for both predefined and custom)"""
+        # Check if it's a predefined choice
+        choices_dict = dict(self.CATEGORY_CHOICES)
+        return choices_dict.get(self.code, self.description or self.code)
+    
+    def save(self, *args, **kwargs):
+        # Auto-fill description if not provided (for predefined categories)
+        if not self.description:
+            choices_dict = dict(self.CATEGORY_CHOICES)
+            self.description = choices_dict.get(self.code, self.code)
+        super().save(*args, **kwargs)
+
+
+class ElectiveVertical(models.Model):
+    """
+    Elective Verticals/Specializations available under a Regulation.
+    Examples: Data Science, Cloud Computing, Cyber Security, AI & ML, etc.
+    
+    Verticals can be managed per regulation, allowing different regulations
+    to have different elective specialization tracks.
+    """
+    
+    regulation = models.ForeignKey(Regulation, on_delete=models.CASCADE, related_name='elective_verticals')
+    name = models.CharField(max_length=100, help_text="Vertical name (e.g., 'Data Science', 'Cloud Computing')")
+    description = models.TextField(blank=True, null=True, help_text="Optional description of the vertical")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ('regulation', 'name')
+        ordering = ['regulation', 'name']
+        verbose_name = 'Elective Vertical'
+        verbose_name_plural = 'Elective Verticals'
+    
+    def __str__(self):
+        return f"{self.regulation} - {self.name}"
+    
+    @classmethod
+    def get_for_regulation(cls, regulation):
+        """Get all active verticals for a regulation"""
+        return cls.objects.filter(regulation=regulation, is_active=True).order_by('name')
+
+
+class RegulationCoursePlan(models.Model):
+    """
+    Base Course Plan for a Regulation.
+    Defines which courses belong to which semester for each branch and program type.
+    This is where course-regulation-category link is made.
+    """
+    
+    regulation = models.ForeignKey('Regulation', on_delete=models.CASCADE, related_name='course_plans')
+    course = models.ForeignKey('Course', on_delete=models.CASCADE, related_name='regulation_plans')
+    category = models.ForeignKey('CourseCategory', on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name='course_plans', help_text="Course category (PCC, ESC, PEC, etc.)")
+    semester = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(8)],
+                                    help_text="Semester number (1-8)")
+    branch = models.CharField(max_length=20, default='CSE', help_text="Program code from Program model")
+    program_type = models.CharField(max_length=5, choices=PROGRAM_TYPE_CHOICES, default='UG')
+    is_elective = models.BooleanField(default=False, help_text="Is this an elective course?")
+    elective_vertical = models.ForeignKey('ElectiveVertical', on_delete=models.SET_NULL, null=True, blank=True,
+                                           related_name='course_plans', help_text="Elective vertical/specialization")
+    is_mandatory = models.BooleanField(default=True, help_text="Is this course mandatory?")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ('regulation', 'course', 'branch', 'program_type')
+        ordering = ['regulation', 'semester', 'branch', 'course']
+        verbose_name = 'Regulation Course Plan'
+        verbose_name_plural = 'Regulation Course Plans'
+    
+    def __str__(self):
+        return f"{self.regulation} - Sem {self.semester} - {self.branch} - {self.course.course_code}"
+    
+    @property
+    def elective_vertical_name(self):
+        """Get the vertical name if it exists"""
+        return self.elective_vertical.name if self.elective_vertical else None
 
 
 class Program(models.Model):
@@ -169,7 +313,6 @@ class Program(models.Model):
     PROGRAM_LEVEL_CHOICES = [
         ('UG', 'Undergraduate'),
         ('PG', 'Postgraduate'),
-        ('PHD', 'Ph.D.'),
     ]
     
     DEGREE_CHOICES = [
@@ -178,7 +321,6 @@ class Program(models.Model):
         ('ME', 'M.E.'),
         ('MTECH', 'M.Tech.'),
         ('MS', 'M.S.'),
-        ('PHD', 'Ph.D.'),
     ]
     
     code = models.CharField(max_length=20, unique=True, help_text="e.g., CSE, CSE-OR, CSE-BDA, SE")
@@ -190,9 +332,12 @@ class Program(models.Model):
     duration_years = models.IntegerField(default=4, validators=[MinValueValidator(1), MaxValueValidator(6)],
                                           help_text="Program duration in years")
     total_semesters = models.IntegerField(default=8, validators=[MinValueValidator(1), MaxValueValidator(12)])
+    default_batch_count = models.IntegerField(default=3, validators=[MinValueValidator(1), MaxValueValidator(10)],
+                                               help_text="Default number of batches for 1st year intake")
+    default_batch_labels = models.CharField(max_length=50, default='A,B,C', blank=True,
+                                             help_text="Default batch names separated by comma (e.g., A,B,C or N,P,Q)")
     regulations = models.ManyToManyField(Regulation, related_name='programs', blank=True,
                                           help_text="Regulations under which this program is offered")
-    is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
@@ -211,53 +356,432 @@ class Program(models.Model):
         if self.specialization:
             return f"{self.get_degree_display()} {self.name} Spl. in {self.specialization}"
         return f"{self.get_degree_display()} {self.name}"
+    
+    @property
+    def is_active(self):
+        """Program is active if it has enrolled students"""
+        return Student_Profile.objects.filter(branch=self.code).exists()
+    
+    @property
+    def student_count(self):
+        """Get count of students enrolled in this program"""
+        return Student_Profile.objects.filter(branch=self.code).count()
 
 
 class AcademicYear(models.Model):
-    """Academic Year Management"""
+    """
+    Academic Year Management with automatic status detection.
+    
+    Status is determined automatically based on semester dates:
+    - UPCOMING: Created but earliest odd semester hasn't started yet
+    - ACTIVE: Current date is within semester range (with grace period)
+    - ARCHIVED: All semesters have ended
+    """
+    
+    STATUS_UPCOMING = 'UPCOMING'
+    STATUS_ACTIVE = 'ACTIVE'
+    STATUS_ARCHIVED = 'ARCHIVED'
+    
+    STATUS_CHOICES = [
+        (STATUS_UPCOMING, 'Upcoming'),
+        (STATUS_ACTIVE, 'Active'),
+        (STATUS_ARCHIVED, 'Archived'),
+    ]
+    
+    GRACE_PERIOD_DAYS = 15  # Grace period after even semester ends
     
     year = models.CharField(max_length=10, unique=True)  # e.g., "2025-26"
-    start_date = models.DateField()
-    end_date = models.DateField()
-    is_current = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
-        ordering = ['-start_date']
+        ordering = ['-year']
         verbose_name = 'Academic Year'
         verbose_name_plural = 'Academic Years'
     
     def __str__(self):
         return self.year
     
-    def save(self, *args, **kwargs):
-        # Ensure only one academic year is marked as current
-        if self.is_current:
-            AcademicYear.objects.filter(is_current=True).update(is_current=False)
-        super().save(*args, **kwargs)
+    @property
+    def status(self):
+        """
+        Automatically determine the status of this academic year.
+        
+        UPCOMING: Earliest odd semester hasn't started yet
+        ACTIVE: Within semester dates (+ grace period if next year hasn't started)
+        ARCHIVED: All semesters have ended and grace period passed
+        """
+        from django.utils import timezone
+        from datetime import timedelta
+        
+        today = timezone.now().date()
+        semesters = self.semesters.all()
+        
+        if not semesters.exists():
+            # No semesters created yet - consider it UPCOMING
+            return self.STATUS_UPCOMING
+        
+        # Get earliest odd semester (1, 3, 5, 7) start date
+        odd_semesters = semesters.filter(semester_number__in=[1, 3, 5, 7])
+        earliest_odd_start = odd_semesters.order_by('start_date').values_list('start_date', flat=True).first()
+        
+        # Get latest even semester (2, 4, 6, 8) end date
+        even_semesters = semesters.filter(semester_number__in=[2, 4, 6, 8])
+        latest_even_end = even_semesters.order_by('-end_date').values_list('end_date', flat=True).first()
+        
+        # If no odd semesters, use earliest semester
+        if not earliest_odd_start:
+            earliest_odd_start = semesters.order_by('start_date').values_list('start_date', flat=True).first()
+        
+        # If no even semesters, use latest semester end
+        if not latest_even_end:
+            latest_even_end = semesters.order_by('-end_date').values_list('end_date', flat=True).first()
+        
+        # Check if UPCOMING: earliest semester hasn't started
+        if earliest_odd_start and today < earliest_odd_start:
+            return self.STATUS_UPCOMING
+        
+        # Check if within active period (including grace period)
+        if latest_even_end:
+            # Check if there's a next academic year that has started
+            next_year_started = self._check_next_year_started(today)
+            
+            if next_year_started:
+                # No grace period if next year has started
+                if today <= latest_even_end:
+                    return self.STATUS_ACTIVE
+            else:
+                # Apply grace period
+                grace_end = latest_even_end + timedelta(days=self.GRACE_PERIOD_DAYS)
+                if today <= grace_end:
+                    return self.STATUS_ACTIVE
+        
+        return self.STATUS_ARCHIVED
+    
+    def _check_next_year_started(self, today):
+        """Check if the next academic year has started (any semester)"""
+        # Parse current year to find next year
+        try:
+            start_year = int(self.year.split('-')[0])
+            next_year_str = f"{start_year + 1}-{str(start_year + 2)[-2:]}"
+            next_year = AcademicYear.objects.filter(year=next_year_str).first()
+            if next_year:
+                earliest_start = next_year.semesters.order_by('start_date').values_list('start_date', flat=True).first()
+                if earliest_start and today >= earliest_start:
+                    return True
+        except (ValueError, IndexError):
+            pass
+        return False
+    
+    @property
+    def status_display(self):
+        """Return display-friendly status with badge class"""
+        status = self.status
+        return {
+            self.STATUS_UPCOMING: ('Upcoming', 'info'),
+            self.STATUS_ACTIVE: ('Active', 'success'),
+            self.STATUS_ARCHIVED: ('Archived', 'secondary'),
+        }.get(status, ('Unknown', 'dark'))
+    
+    @property
+    def is_active(self):
+        """Backward compatibility - returns True if status is ACTIVE or UPCOMING"""
+        return self.status in [self.STATUS_ACTIVE, self.STATUS_UPCOMING]
+    
+    @property
+    def is_current(self):
+        """Check if any semester in this academic year is currently active"""
+        from django.utils import timezone
+        today = timezone.now().date()
+        return self.semesters.filter(start_date__lte=today, end_date__gte=today).exists()
+    
+    @classmethod
+    def get_current(cls):
+        """Get the current academic year based on active semesters"""
+        from django.utils import timezone
+        today = timezone.now().date()
+        # Find academic year with a semester covering today
+        from main_app.models import Semester
+        current_sem = Semester.objects.filter(start_date__lte=today, end_date__gte=today).first()
+        if current_sem:
+            return current_sem.academic_year
+        # Fallback to most recent year that's not archived
+        for year in cls.objects.all():
+            if year.status != cls.STATUS_ARCHIVED:
+                return year
+        return cls.objects.first()
+    
+    @classmethod
+    def get_active_years(cls):
+        """Get all academic years that are ACTIVE or UPCOMING (for semester creation)"""
+        return [y for y in cls.objects.all() if y.status in [cls.STATUS_ACTIVE, cls.STATUS_UPCOMING]]
+    
+    @classmethod
+    def generate_year_choices(cls, range_years=5):
+        """
+        Generate academic year choices dynamically based on current year.
+        Range: (current_year - 5) to (current_year + 5)
+        
+        Example: If current year is 2026, generates:
+        2021-22, 2022-23, 2023-24, 2024-25, 2025-26, 2026-27, 2027-28, 2028-29, 2029-30, 2030-31, 2031-32
+        
+        Note: 2025-26 and 2026-27 are the only years containing 2026, so they can be active.
+        Earlier years (2024-25 and before) will be archived since 2026 is not part of them.
+        """
+        from datetime import datetime
+        current_year = datetime.now().year
+        choices = []
+        # Generate from (current_year - 5) to (current_year + 5)
+        for y in range(current_year - 5, current_year + range_years + 1):
+            year_str = f"{y}-{str(y+1)[-2:]}"
+            choices.append((year_str, year_str))
+        return choices
 
 
 class Semester(models.Model):
-    """Semester Management"""
+    """
+    Semester Management - Year of study is auto-determined from semester number.
+    Sem 1,2 = 1st Year | Sem 3,4 = 2nd Year | Sem 5,6 = 3rd Year | Sem 7,8 = 4th Year
+    """
     
     SEMESTER_CHOICES = [(i, f'Semester {i}') for i in range(1, 9)]
-    TYPE_CHOICES = [
-        ('ODD', 'Odd Semester'),
-        ('EVEN', 'Even Semester'),
-    ]
     
     academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE, related_name='semesters')
-    semester_number = models.IntegerField(choices=SEMESTER_CHOICES)
-    semester_type = models.CharField(max_length=4, choices=TYPE_CHOICES)
+    semester_number = models.IntegerField(choices=SEMESTER_CHOICES,
+                                           help_text="Semester 1-8")
     start_date = models.DateField()
     end_date = models.DateField()
-    is_current = models.BooleanField(default=False)
     
     class Meta:
         unique_together = ('academic_year', 'semester_number')
         ordering = ['-academic_year', 'semester_number']
+        verbose_name = 'Semester'
+        verbose_name_plural = 'Semesters'
     
     def __str__(self):
-        return f"{self.academic_year} - Sem {self.semester_number}"
+        return f"{self.academic_year} - Sem {self.semester_number} ({self.year_of_study_display})"
+    
+    @property
+    def year_of_study(self):
+        """Auto-calculate year of study from semester number"""
+        # Sem 1,2 → Year 1 | Sem 3,4 → Year 2 | Sem 5,6 → Year 3 | Sem 7,8 → Year 4
+        return (self.semester_number + 1) // 2
+    
+    @property
+    def year_of_study_display(self):
+        """Return display text for year of study"""
+        year = self.year_of_study
+        suffixes = {1: '1st Year', 2: '2nd Year', 3: '3rd Year', 4: '4th Year'}
+        return suffixes.get(year, f'Year {year}')
+    
+    @property
+    def semester_type(self):
+        """Auto-determine ODD/EVEN from semester number"""
+        return 'ODD' if self.semester_number % 2 == 1 else 'EVEN'
+    
+    @property
+    def semester_type_display(self):
+        """Return display text for semester type"""
+        return 'Odd Semester' if self.semester_number % 2 == 1 else 'Even Semester'
+    
+    @property
+    def is_current(self):
+        """Auto-detect if this semester is currently active based on dates"""
+        from django.utils import timezone
+        today = timezone.now().date()
+        return self.start_date <= today <= self.end_date
+    
+    @property
+    def status(self):
+        """Get the status of this semester: UPCOMING, CURRENT, or COMPLETED"""
+        from django.utils import timezone
+        today = timezone.now().date()
+        if today < self.start_date:
+            return 'UPCOMING'
+        elif self.start_date <= today <= self.end_date:
+            return 'CURRENT'
+        else:
+            return 'COMPLETED'
+    
+    @property
+    def status_display(self):
+        """Return tuple of (display_text, badge_class) for status"""
+        status = self.status
+        if status == 'UPCOMING':
+            return ('Upcoming', 'info')
+        elif status == 'CURRENT':
+            return ('Current', 'success')
+        else:
+            return ('Completed', 'secondary')
+    
+    @classmethod
+    def get_current(cls):
+        """Get the current semester based on today's date"""
+        from django.utils import timezone
+        today = timezone.now().date()
+        return cls.objects.filter(
+            start_date__lte=today,
+            end_date__gte=today
+        ).first()
+    
+    @classmethod
+    def get_current_for_year(cls, year_of_study):
+        """Get current semester for a specific year of study"""
+        from django.utils import timezone
+        today = timezone.now().date()
+        # Year 1 = Sem 1,2 | Year 2 = Sem 3,4 | Year 3 = Sem 5,6 | Year 4 = Sem 7,8
+        sem_start = (year_of_study - 1) * 2 + 1
+        sem_end = year_of_study * 2
+        return cls.objects.filter(
+            semester_number__in=[sem_start, sem_end],
+            start_date__lte=today,
+            end_date__gte=today
+        ).first()
+
+
+class ProgramBatch(models.Model):
+    """
+    Dynamic Batch/Classroom Management per Program and Academic Year.
+    
+    Allows HOD to define different batches for different programs and years.
+    E.g., B.E. CSE 2024-25 1st years might have batches N, P, Q
+          B.E. CSE 2025-26 1st years might have batches A, B, C, D
+    """
+    
+    academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE, related_name='program_batches')
+    program = models.ForeignKey(Program, on_delete=models.CASCADE, related_name='batches')
+    year_of_study = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(6)],
+                                         help_text="Year of study (1st year, 2nd year, etc.)")
+    batch_name = models.CharField(max_length=10, help_text="Batch/Section name (e.g., A, B, N, P, Q)")
+    batch_display = models.CharField(max_length=50, blank=True, 
+                                      help_text="Display name (e.g., 'N Section')")
+    capacity = models.IntegerField(default=60, validators=[MinValueValidator(1)],
+                                    help_text="Maximum students in this batch")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = ('academic_year', 'program', 'year_of_study', 'batch_name')
+        ordering = ['academic_year', 'program', 'year_of_study', 'batch_name']
+        verbose_name = 'Program Batch'
+        verbose_name_plural = 'Program Batches'
+    
+    def __str__(self):
+        return f"{self.academic_year} - {self.program.code} Year {self.year_of_study} - {self.batch_name}"
+    
+    def save(self, *args, **kwargs):
+        # Auto-fill display name if not provided
+        if not self.batch_display:
+            self.batch_display = f"{self.batch_name} Section"
+        super().save(*args, **kwargs)
+    
+    @classmethod
+    def get_batches_for_program(cls, academic_year, program_code, year_of_study=None):
+        """Get all batches for a program in an academic year"""
+        qs = cls.objects.filter(
+            academic_year=academic_year,
+            program__code=program_code,
+            is_active=True
+        )
+        if year_of_study:
+            qs = qs.filter(year_of_study=year_of_study)
+        return qs.order_by('year_of_study', 'batch_name')
+    
+    @classmethod
+    def copy_from_previous_year(cls, source_year, target_year, program=None):
+        """
+        Copy batch configuration from previous academic year to new year.
+        Returns tuple of (created_count, skipped_count)
+        """
+        filters = {'academic_year': source_year, 'is_active': True}
+        if program:
+            filters['program'] = program
+        
+        source_batches = cls.objects.filter(**filters)
+        created = 0
+        skipped = 0
+        
+        for batch in source_batches:
+            _, was_created = cls.objects.get_or_create(
+                academic_year=target_year,
+                program=batch.program,
+                year_of_study=batch.year_of_study,
+                batch_name=batch.batch_name,
+                defaults={
+                    'batch_display': batch.batch_display,
+                    'capacity': batch.capacity,
+                    'is_active': True
+                }
+            )
+            if was_created:
+                created += 1
+            else:
+                skipped += 1
+        
+        return created, skipped
+    
+    @classmethod
+    def get_batch_choices(cls, academic_year=None, program_code=None, year_of_study=None):
+        """Get batch choices as list of tuples for form fields"""
+        qs = cls.objects.filter(is_active=True)
+        
+        if academic_year:
+            qs = qs.filter(academic_year=academic_year)
+        if program_code:
+            qs = qs.filter(program__code=program_code)
+        if year_of_study:
+            qs = qs.filter(year_of_study=year_of_study)
+        
+        return [(b.batch_name, b.batch_display) for b in qs.distinct('batch_name').order_by('batch_name')]
+    
+    @classmethod
+    def has_students(cls, academic_year, program, year_of_study):
+        """Check if any students are assigned to batches for this program/year"""
+        batches = cls.objects.filter(
+            academic_year=academic_year,
+            program=program,
+            year_of_study=year_of_study,
+            is_active=True
+        )
+        batch_names = batches.values_list('batch_name', flat=True)
+        # Check if any students have this batch_label and branch
+        return Student_Profile.objects.filter(
+            branch=program.code,
+            batch_label__in=batch_names
+        ).exists()
+    
+    @classmethod
+    def create_default_batches(cls, academic_year, program, year_of_study=1, capacity=60):
+        """
+        Create default batches for a program based on program's default settings.
+        Returns tuple of (created_count, batch_names)
+        """
+        # Get batch labels from program settings
+        if program.default_batch_labels:
+            batch_labels = [b.strip().upper() for b in program.default_batch_labels.split(',') if b.strip()]
+        else:
+            # Generate default labels A, B, C, etc.
+            batch_labels = [chr(65 + i) for i in range(program.default_batch_count)]
+        
+        created_count = 0
+        created_names = []
+        
+        for label in batch_labels:
+            batch, was_created = cls.objects.get_or_create(
+                academic_year=academic_year,
+                program=program,
+                year_of_study=year_of_study,
+                batch_name=label,
+                defaults={
+                    'batch_display': f"{label} Section",
+                    'capacity': capacity,
+                    'is_active': True
+                }
+            )
+            if was_created:
+                created_count += 1
+                created_names.append(label)
+        
+        return created_count, created_names
 
 
 # =============================================================================
@@ -335,22 +859,12 @@ class NonTeachingStaff_Profile(models.Model):
 class Student_Profile(models.Model):
     """Profile for Students"""
     
-    BATCH_LABEL_CHOICES = [
-        ('N', 'N Section'),
-        ('P', 'P Section'),
-        ('Q', 'Q Section'),
-    ]
-    
-    BRANCH_CHOICES = [
-        ('CSE', 'Computer Science and Engineering'),
-        ('AIML', 'Artificial Intelligence and Machine Learning'),
-        ('CSBS', 'Computer Science and Business Systems'),
-    ]
-    
-    PROGRAM_TYPE_CHOICES = [
-        ('UG', 'Undergraduate'),
-        ('PG', 'Postgraduate'),
-        ('PHD', 'Ph.D.'),
+    STATUS_CHOICES = [
+        ('ACTIVE', 'Active'),
+        ('GRADUATED', 'Graduated'),
+        ('DROPPED', 'Dropped Out'),
+        ('SUSPENDED', 'Suspended'),
+        ('TRANSFERRED', 'Transferred'),
     ]
     
     register_validator = RegexValidator(
@@ -361,13 +875,16 @@ class Student_Profile(models.Model):
     user = models.OneToOneField(Account_User, on_delete=models.CASCADE, related_name='student_profile')
     register_no = models.CharField(max_length=12, unique=True, validators=[register_validator],
                                     verbose_name='Register Number')
-    batch_label = models.CharField(max_length=1, choices=BATCH_LABEL_CHOICES, 
+    batch_label = models.CharField(max_length=10, default='A', 
                                     verbose_name='Classroom Section')
-    branch = models.CharField(max_length=10, choices=BRANCH_CHOICES, default='CSE')
+    branch = models.CharField(max_length=20, default='CSE', help_text="Program code from Program model")
     program_type = models.CharField(max_length=5, choices=PROGRAM_TYPE_CHOICES, default='UG')
-    regulation = models.ForeignKey(Regulation, on_delete=models.SET_NULL, null=True, blank=True)
+    regulation = models.ForeignKey(Regulation, on_delete=models.SET_NULL, null=True, blank=True,
+                                    related_name='students')
     current_sem = models.IntegerField(default=1, validators=[MinValueValidator(1), MaxValueValidator(8)])
+    status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='ACTIVE')
     admission_year = models.IntegerField(null=True, blank=True)
+    graduation_year = models.IntegerField(null=True, blank=True, help_text="Year of graduation (set when student completes 8th sem)")
     advisor = models.ForeignKey(Faculty_Profile, on_delete=models.SET_NULL, null=True, blank=True,
                                  related_name='advisees', verbose_name='Faculty Advisor/Counselor')
     parent_name = models.CharField(max_length=200, blank=True, null=True)
@@ -382,6 +899,59 @@ class Student_Profile(models.Model):
     
     def __str__(self):
         return f"{self.register_no} - {self.user.full_name} ({self.branch})"
+    
+    @property
+    def year_of_study(self):
+        """Auto-calculate year of study from current semester"""
+        return (self.current_sem + 1) // 2
+    
+    @property
+    def year_of_study_display(self):
+        """Return display text for year of study"""
+        year = self.year_of_study
+        suffixes = {1: '1st Year', 2: '2nd Year', 3: '3rd Year', 4: '4th Year'}
+        return suffixes.get(year, f'{year}th Year')
+    
+    @property
+    def is_final_year(self):
+        """Check if student is in final year (sem 7 or 8)"""
+        return self.current_sem >= 7
+    
+    @property
+    def can_be_promoted(self):
+        """Check if student can be promoted"""
+        return self.status == 'ACTIVE' and self.current_sem < 8
+    
+    @property
+    def branch_display(self):
+        """Get branch display name from Program model"""
+        try:
+            program = Program.objects.filter(code=self.branch).first()
+            if program:
+                return program.name if not program.specialization else f"{program.name} - {program.specialization}"
+        except:
+            pass
+        return self.branch  # Fallback to code if program not found
+    
+    @property
+    def batch_display(self):
+        """Get batch display name from ProgramBatch model"""
+        try:
+            # Get current academic year
+            current_year = AcademicYear.get_current()
+            if current_year:
+                batch = ProgramBatch.objects.filter(
+                    academic_year=current_year,
+                    program__code=self.branch,
+                    year_of_study=self.year_of_study,
+                    batch_name=self.batch_label,
+                    is_active=True
+                ).first()
+                if batch:
+                    return batch.batch_display
+        except:
+            pass
+        return f"{self.batch_label} Section"  # Fallback
 
 
 # =============================================================================
@@ -389,35 +959,232 @@ class Student_Profile(models.Model):
 # =============================================================================
 
 class Course(models.Model):
-    """Course/Subject Master Table"""
+    """
+    Course/Subject Master Table.
+    Courses are universal - not tied to any specific regulation.
+    The regulation-course link is made in RegulationCoursePlan.
     
+    Placeholder courses (is_placeholder=True) are used for slots like:
+    - Professional Elective (PEC)
+    - Open Elective (OEC)
+    - Skill Development Course (SDC)
+    - Self Learning Course (SLC)
+    - Industry Oriented Course (IOC)
+    - Audit Course (AC)
+    - NCC/NSS/NSO/YRC
+    """
+    
+    # Course Types as per Anna University regulation
     COURSE_TYPE_CHOICES = [
-        ('THEORY', 'Theory'),
-        ('LAB', 'Laboratory'),
-        ('PROJECT', 'Project'),
-        ('SEMINAR', 'Seminar'),
+        ('LIT', 'Laboratory Integrated Theory'),
+        ('T', 'Theory'),
+        ('L', 'Laboratory Course'),
+        ('IPW', 'Internship cum Project Work'),
+        ('PW', 'Project Work'),
+        ('CDP', 'Capstone Design Project'),
     ]
     
-    course_code = models.CharField(max_length=10, primary_key=True)  # e.g., "CS3401"
+    # Placeholder types for elective/variable slots
+    PLACEHOLDER_TYPE_CHOICES = [
+        ('PEC', 'Professional Elective Course'),
+        ('OEC', 'Open Elective Course'),
+        ('SDC', 'Skill Development Course'),
+        ('SLC', 'Self Learning Course'),
+        ('IOC', 'Industry Oriented Course'),
+        ('AC', 'Audit Course'),
+        ('ETC', 'Emerging Technology Course'),
+        ('NCC', 'NCC/NSS/NSO/YRC'),
+        ('HON', 'Honours Elective'),
+        ('MIN', 'Minor Elective'),
+    ]
+    
+    course_code = models.CharField(max_length=10, primary_key=True)  # e.g., "CS3401" or "PEC-01"
     title = models.CharField(max_length=200)
-    regulation = models.ForeignKey(Regulation, on_delete=models.CASCADE, related_name='courses')
-    course_type = models.CharField(max_length=10, choices=COURSE_TYPE_CHOICES, default='THEORY')
-    is_lab = models.BooleanField(default=False)
+    course_type = models.CharField(max_length=10, choices=COURSE_TYPE_CHOICES, default='T', blank=True, null=True)
     credits = models.IntegerField(default=3, validators=[MinValueValidator(0), MaxValueValidator(10)])
-    lecture_hours = models.IntegerField(default=3, validators=[MinValueValidator(0)])
-    tutorial_hours = models.IntegerField(default=0, validators=[MinValueValidator(0)])
-    practical_hours = models.IntegerField(default=0, validators=[MinValueValidator(0)])
-    semester = models.IntegerField(default=1, validators=[MinValueValidator(1), MaxValueValidator(8)])
-    branch = models.CharField(max_length=10, choices=Student_Profile.BRANCH_CHOICES, default='CSE')
+    lecture_hours = models.IntegerField(default=3, validators=[MinValueValidator(0)],
+                                         help_text="L in L-T-P")
+    tutorial_hours = models.IntegerField(default=0, validators=[MinValueValidator(0)],
+                                          help_text="T in L-T-P")
+    practical_hours = models.IntegerField(default=0, validators=[MinValueValidator(0)],
+                                           help_text="P in L-T-P")
     syllabus_file = models.FileField(upload_to='syllabus/', blank=True, null=True)
+    
+    # Placeholder support
+    is_placeholder = models.BooleanField(default=False, 
+                                          help_text="True for slots like PEC-I, OEC-I that get filled later")
+    placeholder_type = models.CharField(max_length=5, choices=PLACEHOLDER_TYPE_CHOICES, 
+                                         blank=True, null=True,
+                                         help_text="Type of placeholder (PEC, OEC, SDC, etc.)")
+    slot_number = models.IntegerField(blank=True, null=True,
+                                       help_text="Slot number for placeholders (1 for PEC-I, 2 for PEC-II, etc.)")
+    
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
     class Meta:
-        ordering = ['semester', 'course_code']
+        ordering = ['course_code']
     
     def __str__(self):
+        if self.is_placeholder:
+            return f"{self.course_code} - {self.title} (Placeholder)"
         return f"{self.course_code} - {self.title}"
+    
+    @property
+    def ltp_display(self):
+        """Return L-T-P format string"""
+        if self.is_placeholder:
+            return "-"
+        return f"{self.lecture_hours}-{self.tutorial_hours}-{self.practical_hours}"
+    
+    @property
+    def is_lab(self):
+        """Check if this is a lab course"""
+        return self.course_type in ['L', 'CDP']
+    
+    @classmethod
+    def get_placeholders_by_type(cls, placeholder_type):
+        """Get all placeholder courses of a specific type, ordered by slot number"""
+        return cls.objects.filter(
+            is_placeholder=True, 
+            placeholder_type=placeholder_type
+        ).order_by('slot_number')
+    
+    @classmethod
+    def get_or_create_placeholder(cls, placeholder_type, slot_number, credits=3):
+        """Get or create a placeholder course"""
+        roman_numerals = {1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V', 6: 'VI', 
+                         7: 'VII', 8: 'VIII', 9: 'IX', 10: 'X'}
+        
+        type_names = dict(cls.PLACEHOLDER_TYPE_CHOICES)
+        type_name = type_names.get(placeholder_type, placeholder_type)
+        
+        code = f"{placeholder_type}-{slot_number:02d}"
+        title = f"{type_name} - {roman_numerals.get(slot_number, slot_number)}"
+        
+        course, created = cls.objects.get_or_create(
+            course_code=code,
+            defaults={
+                'title': title,
+                'course_type': None,
+                'credits': credits,
+                'lecture_hours': 0,
+                'tutorial_hours': 0,
+                'practical_hours': 0,
+                'is_placeholder': True,
+                'placeholder_type': placeholder_type,
+                'slot_number': slot_number
+            }
+        )
+        return course, created
+
+
+class ElectiveCourseOffering(models.Model):
+    """
+    Maps placeholder courses (PEC-I, OEC-I, etc.) to actual courses 
+    for a specific academic semester.
+    
+    Example:
+    - PEC-I in Sem 5 of 2025-26 → Offered courses: Data Mining, Info Security
+    - Data Mining: 2 batches, 80 students each
+    - Info Security: 1 batch, 60 students
+    
+    This allows HOD to:
+    1. Define which actual courses fulfill each elective slot
+    2. Set capacity limits for each offering
+    3. Assign faculty to specific course-batch combinations
+    """
+    
+    # Link to the regulation course plan (the placeholder entry)
+    regulation_course_plan = models.ForeignKey(
+        'RegulationCoursePlan', 
+        on_delete=models.CASCADE, 
+        related_name='elective_offerings',
+        help_text="The placeholder slot (e.g., PEC-I in Sem 5)"
+    )
+    
+    # The academic semester when this offering is active
+    semester = models.ForeignKey(
+        'Semester', 
+        on_delete=models.CASCADE, 
+        related_name='elective_offerings',
+        help_text="Academic semester (e.g., 2025-26 Sem 5)"
+    )
+    
+    # The actual course being offered for this slot
+    actual_course = models.ForeignKey(
+        'Course', 
+        on_delete=models.CASCADE, 
+        related_name='elective_offerings',
+        limit_choices_to={'is_placeholder': False},
+        help_text="The actual course (e.g., CS23001 - Data Mining)"
+    )
+    
+    # Capacity management
+    batch_count = models.IntegerField(
+        default=1, 
+        validators=[MinValueValidator(1), MaxValueValidator(10)],
+        help_text="Number of batches for this course offering"
+    )
+    capacity_per_batch = models.IntegerField(
+        default=60, 
+        validators=[MinValueValidator(1)],
+        help_text="Maximum students per batch"
+    )
+    
+    # Optional: link to elective vertical (for PEC courses)
+    elective_vertical = models.ForeignKey(
+        'ElectiveVertical',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='course_offerings',
+        help_text="Elective vertical this course belongs to (optional)"
+    )
+    
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ('regulation_course_plan', 'semester', 'actual_course')
+        ordering = ['semester', 'regulation_course_plan', 'actual_course']
+        verbose_name = 'Elective Course Offering'
+        verbose_name_plural = 'Elective Course Offerings'
+    
+    def __str__(self):
+        placeholder = self.regulation_course_plan.course.title if self.regulation_course_plan.course else "Unknown"
+        return f"{self.semester} - {placeholder} → {self.actual_course.title} ({self.batch_count} batch(es))"
+    
+    @property
+    def total_capacity(self):
+        """Total student capacity for this offering"""
+        return self.batch_count * self.capacity_per_batch
+    
+    @classmethod
+    def get_offerings_for_slot(cls, regulation_course_plan, semester):
+        """Get all course offerings for a placeholder slot in a semester"""
+        return cls.objects.filter(
+            regulation_course_plan=regulation_course_plan,
+            semester=semester,
+            is_active=True
+        ).select_related('actual_course', 'elective_vertical')
+    
+    @classmethod
+    def get_total_capacity_for_slot(cls, regulation_course_plan, semester):
+        """Get total capacity across all offerings for a slot"""
+        offerings = cls.get_offerings_for_slot(regulation_course_plan, semester)
+        return sum(o.total_capacity for o in offerings)
+    
+    @classmethod
+    def validate_capacity(cls, regulation_course_plan, semester, student_count):
+        """
+        Validate that total offering capacity meets student demand.
+        Returns (is_valid, total_capacity, shortfall)
+        """
+        total_capacity = cls.get_total_capacity_for_slot(regulation_course_plan, semester)
+        is_valid = total_capacity >= student_count
+        shortfall = max(0, student_count - total_capacity)
+        return is_valid, total_capacity, shortfall
 
 
 class Course_Assignment(models.Model):
@@ -428,7 +1195,8 @@ class Course_Assignment(models.Model):
     
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='assignments')
     faculty = models.ForeignKey(Faculty_Profile, on_delete=models.CASCADE, related_name='course_assignments')
-    batch_label = models.CharField(max_length=1, choices=Student_Profile.BATCH_LABEL_CHOICES)
+    batch = models.ForeignKey('ProgramBatch', on_delete=models.CASCADE, null=True, blank=True, related_name='course_assignments')
+    batch_label = models.CharField(max_length=1, blank=True)  # Legacy field for backward compatibility
     academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE)
     semester = models.ForeignKey(Semester, on_delete=models.CASCADE)
     is_active = models.BooleanField(default=True)
@@ -1016,16 +1784,12 @@ class Timetable(models.Model):
         (4, '4th Year'),
     ]
     
-    BATCH_CHOICES = [
-        ('N', 'N Batch'),
-        ('P', 'P Batch'),
-        ('Q', 'Q Batch'),
-    ]
-    
     academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE, related_name='timetables')
     semester = models.ForeignKey(Semester, on_delete=models.CASCADE, related_name='timetables')
     year = models.IntegerField(choices=YEAR_CHOICES)
-    batch = models.CharField(max_length=1, choices=BATCH_CHOICES)
+    program_batch = models.ForeignKey('ProgramBatch', on_delete=models.SET_NULL, null=True, blank=True, 
+                                       related_name='timetables')
+    batch = models.CharField(max_length=10, blank=True, help_text="Legacy field - use program_batch instead")
     regulation = models.ForeignKey(Regulation, on_delete=models.SET_NULL, null=True, blank=True)
     effective_from = models.DateField(help_text="Date from which this timetable is effective")
     created_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True, 
@@ -1035,13 +1799,20 @@ class Timetable(models.Model):
     is_active = models.BooleanField(default=True)
     
     class Meta:
-        unique_together = ('academic_year', 'semester', 'year', 'batch')
         ordering = ['-academic_year', 'year', 'batch']
         verbose_name = 'Timetable'
         verbose_name_plural = 'Timetables'
     
     def __str__(self):
-        return f"{self.academic_year} - Sem {self.semester.semester_number} - Year {self.year} - Batch {self.batch}"
+        batch_name = self.program_batch.batch_name if self.program_batch else self.batch
+        return f"{self.academic_year} - Sem {self.semester.semester_number} - Year {self.year} - Batch {batch_name}"
+    
+    @property
+    def batch_display(self):
+        """Display batch from ForeignKey or legacy field"""
+        if self.program_batch:
+            return self.program_batch.batch_name
+        return self.batch or "No Batch"
 
 
 class TimetableEntry(models.Model):

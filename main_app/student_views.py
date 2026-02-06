@@ -575,7 +575,7 @@ def student_view_timetable(request):
     
     # Get the current academic year
     try:
-        current_academic_year = AcademicYear.objects.filter(is_current=True).first()
+        current_academic_year = AcademicYear.get_current()
         if not current_academic_year:
             current_academic_year = AcademicYear.objects.order_by('-start_date').first()
     except:
@@ -583,7 +583,7 @@ def student_view_timetable(request):
     
     # Get the current semester
     try:
-        current_semester = Semester.objects.filter(is_current=True).first()
+        current_semester = Semester.get_current()
         if not current_semester:
             current_semester = Semester.objects.order_by('-academic_year', '-semester_number').first()
     except:

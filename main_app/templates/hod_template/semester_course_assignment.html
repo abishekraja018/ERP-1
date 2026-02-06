@@ -1,0 +1,814 @@
+{% extends 'main_app/base.html' %}
+{% load static %}
+{% load custom_filters %}
+{% block page_title %}{{ page_title }}{% endblock page_title %}
+
+{% block content %}
+<style>
+    .course-type-header {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 10px 15px;
+        border-radius: 5px 5px 0 0;
+        margin-top: 15px;
+    }
+    .course-type-header.core { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }
+    .course-type-header.elective { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); }
+    .placeholder-course-row {
+        background-color: #fff9e6 !important;
+    }
+    .placeholder-badge {
+        font-size: 0.7rem;
+        padding: 2px 6px;
+    }
+    .elective-offerings {
+        background: #e8f4fd;
+        border: 1px dashed #007bff;
+        padding: 10px;
+        border-radius: 5px;
+        margin-top: 5px;
+    }
+    .offering-item {
+        display: flex;
+        align-items: center;
+        padding: 5px;
+        border-bottom: 1px solid #dee2e6;
+    }
+    .offering-item:last-child {
+        border-bottom: none;
+    }
+    .assignment-badge {
+        display: inline-flex;
+        align-items: center;
+        margin: 2px;
+        padding: 3px 8px;
+        background: #e9ecef;
+        border-radius: 15px;
+        font-size: 0.85rem;
+    }
+    .assignment-badge .batch {
+        background: #007bff;
+        color: white;
+        padding: 2px 6px;
+        border-radius: 10px;
+        margin-right: 5px;
+        font-size: 0.75rem;
+    }
+</style>
+
+<section class="content">
+    <div class="container-fluid">
+        <!-- Step 1: Select Semester -->
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card card-outline card-primary">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <i class="fas fa-calendar-check mr-2"></i>Step 1: Select Semester & Section
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <form method="GET" action="{% url 'semester_course_assignment' %}" id="filterForm">
+                            <div class="row align-items-end">
+                                <div class="col-md-3">
+                                    <div class="form-group mb-0">
+                                        <label><i class="fas fa-calendar mr-1"></i>Academic Semester</label>
+                                        <select name="semester_id" class="form-control" id="semesterSelect">
+                                            <option value="">-- Select Semester --</option>
+                                            {% for sem in semesters %}
+                                            <option value="{{ sem.id }}" {% if selected_semester == sem.id|stringformat:"i" %}selected{% endif %}>
+                                                {{ sem.academic_year }} - Sem {{ sem.semester_number }} ({{ sem.semester_type }})
+                                            </option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="col-md-2">
+                                    <div class="form-group mb-0">
+                                        <label><i class="fas fa-graduation-cap mr-1"></i>Program</label>
+                                        <select name="program_type" id="programTypeFilter" class="form-control">
+                                            {% for code, name in program_levels %}
+                                            <option value="{{ code }}" {% if selected_program == code %}selected{% endif %}>{{ name }}</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="col-md-2">
+                                    <div class="form-group mb-0">
+                                        <label><i class="fas fa-code-branch mr-1"></i>Branch</label>
+                                        <select name="branch" id="branchFilter" class="form-control">
+                                            {% for program in filtered_programs %}
+                                            <option value="{{ program.code }}" {% if selected_branch == program.code %}selected{% endif %}>
+                                                {{ program.code }}{% if program.specialization %} - {{ program.specialization }}{% endif %}
+                                            </option>
+                                            {% empty %}
+                                            <option value="">No programs</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="col-md-2">
+                                    <div class="form-group mb-0">
+                                        <label><i class="fas fa-users mr-1"></i>Section</label>
+                                        <select name="batch" id="batchFilter" class="form-control">
+                                            <option value="">All Sections</option>
+                                            {% for code, name in batch_choices %}
+                                            <option value="{{ code }}" {% if selected_batch == code %}selected{% endif %}>{{ name }}</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <button type="submit" class="btn btn-primary btn-block">
+                                        <i class="fas fa-search mr-1"></i> Load Courses
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        {% if semester_obj %}
+        <!-- Info Summary -->
+        <div class="row">
+            <div class="col-md-12">
+                <div class="callout callout-info">
+                    <div class="row">
+                        <div class="col-md-3">
+                            <h5><i class="fas fa-calendar-alt mr-2"></i>{{ semester_obj.academic_year }}</h5>
+                            <p class="mb-0">Semester {{ semester_obj.semester_number }} ({{ semester_obj.semester_type }})</p>
+                        </div>
+                        <div class="col-md-3">
+                            <h5><i class="fas fa-users mr-2"></i>{{ student_count }} Students</h5>
+                            <p class="mb-0">{{ selected_branch }} - {% if selected_batch %}{{ selected_batch }}{% else %}All Sections{% endif %}</p>
+                        </div>
+                        <div class="col-md-3">
+                            <h5><i class="fas fa-book mr-2"></i>Regulation</h5>
+                            <p class="mb-0">
+                                {% if regulation %}
+                                <span class="badge badge-success badge-lg">{{ regulation }}</span>
+                                {% elif needs_regulation_selection %}
+                                <span class="badge badge-info">Select Below ↓</span>
+                                {% else %}
+                                <span class="badge badge-warning">Not Assigned</span>
+                                {% endif %}
+                            </p>
+                        </div>
+                        <div class="col-md-3 text-right">
+                            {% if regulation %}
+                            <a href="{% url 'manage_regulation_courses' regulation.id %}" class="btn btn-outline-primary btn-sm">
+                                <i class="fas fa-cog mr-1"></i> Manage Course Plan
+                            </a>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Course Assignment Section -->
+        <div class="row">
+            <div class="col-md-12">
+                {% if course_plans %}
+                
+                <!-- Core Courses Section -->
+                {% if core_courses %}
+                <div class="course-type-header core">
+                    <i class="fas fa-book-open mr-2"></i>Core Courses
+                    <span class="badge badge-light ml-2">{{ core_courses|length }}</span>
+                </div>
+                <div class="card mb-3" style="border-radius: 0 0 5px 5px;">
+                    <div class="card-body p-0">
+                        <table class="table table-hover mb-0">
+                            <thead class="thead-light">
+                                <tr>
+                                    <th width="150">Course Code</th>
+                                    <th>Title</th>
+                                    <th width="80">Credits</th>
+                                    <th width="100">L-T-P</th>
+                                    <th width="300">Faculty Assignment</th>
+                                    <th width="100">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for plan in core_courses %}
+                                <tr data-course="{{ plan.course.course_code }}">
+                                    <td>
+                                        <strong>{{ plan.course.course_code }}</strong>
+                                        {% if plan.category %}
+                                        <br><small class="text-muted">{{ plan.category.code }}</small>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ plan.course.title }}</td>
+                                    <td>{{ plan.course.credits }}</td>
+                                    <td>{{ plan.course.ltp_display }}</td>
+                                    <td>
+                                        {% with assignments=plan.course.course_code|get_assignments:existing_assignments %}
+                                        {% if assignments %}
+                                            {% for assign in assignments %}
+                                            <span class="assignment-badge">
+                                                <span class="batch">{{ assign.batch_label }}</span>
+                                                {{ assign.faculty.user.full_name }}
+                                            </span>
+                                            {% endfor %}
+                                        {% else %}
+                                            <span class="text-muted"><i class="fas fa-exclamation-circle mr-1"></i>Not Assigned</span>
+                                        {% endif %}
+                                        {% endwith %}
+                                    </td>
+                                    <td>
+                                        <button type="button" class="btn btn-sm btn-primary assign-btn" 
+                                                data-course="{{ plan.course.course_code }}"
+                                                data-title="{{ plan.course.title }}"
+                                                data-toggle="modal" data-target="#assignModal">
+                                            <i class="fas fa-user-plus"></i>
+                                        </button>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                {% endif %}
+
+                <!-- Elective/Placeholder Courses Section -->
+                {% if elective_courses %}
+                <div class="course-type-header elective">
+                    <i class="fas fa-list-alt mr-2"></i>Elective & Placeholder Courses
+                    <span class="badge badge-light ml-2">{{ elective_courses|length }}</span>
+                </div>
+                <div class="card mb-3" style="border-radius: 0 0 5px 5px;">
+                    <div class="card-body p-0">
+                        <table class="table table-hover mb-0">
+                            <thead class="thead-light">
+                                <tr>
+                                    <th width="150">Slot/Code</th>
+                                    <th width="100">Category</th>
+                                    <th width="80">Credits</th>
+                                    <th>Offered Courses & Faculty</th>
+                                    <th width="120">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for plan in elective_courses %}
+                                <tr class="{% if plan.course.is_placeholder %}placeholder-course-row{% endif %}" 
+                                    data-course="{{ plan.course.course_code }}" data-plan-id="{{ plan.id }}">
+                                    <td>
+                                        <strong>{{ plan.course.course_code }}</strong>
+                                        {% if plan.course.is_placeholder %}
+                                        <br><span class="badge badge-warning placeholder-badge">Placeholder</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <span class="badge badge-info">{{ plan.category.code }}</span>
+                                        {% if plan.elective_vertical %}
+                                        <br><small class="text-muted">{{ plan.elective_vertical.name }}</small>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ plan.course.credits }}</td>
+                                    <td>
+                                        {% if plan.course.is_placeholder %}
+                                        <!-- Show elective offerings for placeholders -->
+                                        <div class="elective-offerings-list" data-plan-id="{{ plan.id }}">
+                                            {% with offerings=plan.id|get_elective_offerings:elective_offerings_map %}
+                                            {% if offerings %}
+                                                {% for offering in offerings %}
+                                                <div class="offering-item">
+                                                    <span class="badge badge-primary mr-2">{{ offering.batch_count }} batch(es)</span>
+                                                    <strong>{{ offering.actual_course.course_code }}</strong> - 
+                                                    {{ offering.actual_course.title|truncatechars:30 }}
+                                                    {% if offering.faculty %}
+                                                    <span class="ml-2 text-success">
+                                                        <i class="fas fa-user mr-1"></i>{{ offering.faculty.user.full_name }}
+                                                    </span>
+                                                    {% endif %}
+                                                </div>
+                                                {% endfor %}
+                                            {% else %}
+                                                <span class="text-muted">
+                                                    <i class="fas fa-info-circle mr-1"></i>No courses offered. Click "Manage" to add.
+                                                </span>
+                                            {% endif %}
+                                            {% endwith %}
+                                        </div>
+                                        {% else %}
+                                        <!-- Regular elective - show assignments -->
+                                        {% with assignments=plan.course.course_code|get_assignments:existing_assignments %}
+                                        {% if assignments %}
+                                            {% for assign in assignments %}
+                                            <span class="assignment-badge">
+                                                <span class="batch">{{ assign.batch_label }}</span>
+                                                {{ assign.faculty.user.full_name }}
+                                            </span>
+                                            {% endfor %}
+                                        {% else %}
+                                            <span class="text-muted"><i class="fas fa-exclamation-circle mr-1"></i>Not Assigned</span>
+                                        {% endif %}
+                                        {% endwith %}
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if plan.course.is_placeholder %}
+                                        <button type="button" class="btn btn-sm btn-warning manage-offerings-btn"
+                                                data-plan-id="{{ plan.id }}"
+                                                data-course="{{ plan.course.course_code }}"
+                                                data-type="{{ plan.course.placeholder_type }}"
+                                                data-toggle="modal" data-target="#manageOfferingsModal">
+                                            <i class="fas fa-cogs mr-1"></i>Manage
+                                        </button>
+                                        {% else %}
+                                        <button type="button" class="btn btn-sm btn-primary assign-btn"
+                                                data-course="{{ plan.course.course_code }}"
+                                                data-title="{{ plan.course.title }}"
+                                                data-toggle="modal" data-target="#assignModal">
+                                            <i class="fas fa-user-plus"></i>
+                                        </button>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                {% endif %}
+
+                {% else %}
+                <div class="card">
+                    <div class="card-body text-center py-5">
+                        <i class="fas fa-inbox fa-3x text-muted mb-3"></i>
+                        <h5 class="text-muted">No Courses in Plan</h5>
+                        {% if regulation %}
+                        <p>No courses found for Semester {{ semester_obj.semester_number }}.</p>
+                        <a href="{% url 'manage_regulation_courses' regulation.id %}" class="btn btn-primary">
+                            <i class="fas fa-plus mr-1"></i> Add Courses to Plan
+                        </a>
+                        {% elif needs_regulation_selection %}
+                        <p class="text-info mb-3">
+                            <i class="fas fa-info-circle mr-1"></i>
+                            No students found in this semester. Please select a regulation to view its course plan.
+                        </p>
+                        <form method="GET" action="{% url 'semester_course_assignment' %}" class="d-inline-block" style="min-width: 400px;">
+                            <input type="hidden" name="semester_id" value="{{ selected_semester }}">
+                            <input type="hidden" name="program_type" value="{{ selected_program }}">
+                            <input type="hidden" name="branch" value="{{ selected_branch }}">
+                            {% if selected_batch %}<input type="hidden" name="batch" value="{{ selected_batch }}">{% endif %}
+                            <div class="input-group">
+                                <select name="regulation_id" class="form-control" required>
+                                    <option value="">-- Select Regulation --</option>
+                                    {% for reg in all_regulations %}
+                                    <option value="{{ reg.id }}" {% if selected_regulation_id == reg.id|stringformat:"i" %}selected{% endif %}>
+                                        {{ reg.name }} ({{ reg.year }})
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                <div class="input-group-append">
+                                    <button type="submit" class="btn btn-primary">
+                                        <i class="fas fa-arrow-right mr-1"></i> Load Course Plan
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+                        {% else %}
+                        <p class="text-warning">No regulation assigned to students.</p>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Existing Assignments Summary -->
+        {% if existing_assignments %}
+        <div class="row mt-3">
+            <div class="col-md-12">
+                <div class="card card-outline card-secondary collapsed-card">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <i class="fas fa-check-double mr-2"></i>All Existing Assignments
+                        </h3>
+                        <div class="card-tools">
+                            <span class="badge badge-success mr-2">{{ existing_assignments|length }} assignments</span>
+                            <button type="button" class="btn btn-tool" data-card-widget="collapse">
+                                <i class="fas fa-plus"></i>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="card-body p-0">
+                        <table class="table table-sm table-striped mb-0">
+                            <thead class="thead-light">
+                                <tr>
+                                    <th>Course</th>
+                                    <th>Title</th>
+                                    <th>Faculty</th>
+                                    <th>Section</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for assignment in existing_assignments %}
+                                <tr>
+                                    <td><strong>{{ assignment.course.course_code }}</strong></td>
+                                    <td>{{ assignment.course.title|truncatechars:40 }}</td>
+                                    <td>{{ assignment.faculty.user.full_name }}</td>
+                                    <td><span class="badge badge-primary">{{ assignment.batch_label }}</span></td>
+                                    <td>
+                                        {% if assignment.is_active %}
+                                        <span class="badge badge-success">Active</span>
+                                        {% else %}
+                                        <span class="badge badge-secondary">Inactive</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <a href="{% url 'delete_course_assignment' assignment.id %}" 
+                                           class="btn btn-xs btn-danger"
+                                           onclick="return confirm('Delete this assignment?')">
+                                            <i class="fas fa-trash"></i>
+                                        </a>
+                                    </td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        {% else %}
+        <!-- No Semester Selected -->
+        <div class="row">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-body text-center py-5">
+                        <i class="fas fa-hand-point-up fa-3x text-primary mb-3"></i>
+                        <h4>Select a Semester to Begin</h4>
+                        <p class="text-muted">Choose the academic semester above to view and manage course-faculty assignments.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</section>
+
+<!-- Assignment Modal -->
+<div class="modal fade" id="assignModal" tabindex="-1" role="dialog">
+    <div class="modal-dialog modal-lg" role="document">
+        <div class="modal-content">
+            <div class="modal-header bg-primary text-white">
+                <h5 class="modal-title"><i class="fas fa-user-plus mr-2"></i>Assign Faculty to Course</h5>
+                <button type="button" class="close text-white" data-dismiss="modal"><span>&times;</span></button>
+            </div>
+            <form method="POST" action="{% url 'create_course_assignments' %}" id="assignForm">
+                {% csrf_token %}
+                <input type="hidden" name="semester_id" value="{% if semester_obj %}{{ semester_obj.id }}{% endif %}">
+                <input type="hidden" name="academic_year_id" value="{% if academic_year %}{{ academic_year.id }}{% endif %}">
+                <input type="hidden" name="branch" value="{{ selected_branch }}">
+                <input type="hidden" name="program_type" value="{{ selected_program }}">
+                <input type="hidden" name="course_code[]" id="modalCourseCode">
+                
+                <div class="modal-body">
+                    <div class="form-group">
+                        <label>Course</label>
+                        <input type="text" class="form-control" id="modalCourseDisplay" readonly>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Select Sections to Assign <span class="text-danger">*</span></label>
+                        <div class="row" id="batchCheckboxes">
+                            {% for code, name in batch_choices %}
+                            <div class="col-md-4">
+                                <div class="custom-control custom-checkbox">
+                                    <input type="checkbox" class="custom-control-input batch-checkbox" 
+                                           name="batch_labels[]" value="{{ code }}" id="batch_{{ code }}">
+                                    <label class="custom-control-label" for="batch_{{ code }}">{{ name }}</label>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>Faculty <span class="text-danger">*</span></label>
+                        <select name="faculty_id[]" class="form-control" id="modalFaculty" required>
+                            <option value="">-- Select Faculty --</option>
+                            {% for faculty in faculty_list %}
+                            <option value="{{ faculty.id }}">{{ faculty.user.full_name }} ({{ faculty.designation }})</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    
+                    <div class="alert alert-info">
+                        <i class="fas fa-info-circle mr-2"></i>
+                        This will create one assignment per selected section with the same faculty.
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-save mr-1"></i> Create Assignment(s)
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+
+<!-- Manage Elective Offerings Modal -->
+<div class="modal fade" id="manageOfferingsModal" tabindex="-1" role="dialog">
+    <div class="modal-dialog modal-xl" role="document">
+        <div class="modal-content">
+            <div class="modal-header bg-warning">
+                <h5 class="modal-title"><i class="fas fa-cogs mr-2"></i>Manage Elective Course Offerings</h5>
+                <button type="button" class="close" data-dismiss="modal"><span>&times;</span></button>
+            </div>
+            <div class="modal-body">
+                <div class="row mb-3">
+                    <div class="col-md-6">
+                        <h6>Placeholder Slot: <strong id="offeringSlotName"></strong></h6>
+                        <p class="text-muted mb-0">Add actual courses that will be offered for this elective slot.</p>
+                    </div>
+                    <div class="col-md-6 text-right">
+                        <span class="badge badge-info" id="totalStudentsInfo">{{ student_count|default:0 }} students in this semester</span>
+                    </div>
+                </div>
+                
+                <!-- Add New Offering Form -->
+                <div class="card card-outline card-success mb-3">
+                    <div class="card-header py-2">
+                        <h6 class="mb-0"><i class="fas fa-plus mr-1"></i>Add Course Offering</h6>
+                    </div>
+                    <div class="card-body">
+                        <form id="addOfferingForm">
+                            <input type="hidden" id="offeringPlanId">
+                            <input type="hidden" id="offeringSemesterId" value="{% if semester_obj %}{{ semester_obj.id }}{% endif %}">
+                            <div class="row align-items-end">
+                                <div class="col-md-4">
+                                    <div class="form-group mb-0">
+                                        <label class="small">Search Course</label>
+                                        <input type="text" class="form-control form-control-sm" id="offeringCourseSearch" 
+                                               placeholder="Type course code or title..." autocomplete="off">
+                                        <input type="hidden" id="offeringCourseCode">
+                                        <div id="offeringCourseDropdown" class="dropdown-menu w-100" style="max-height:200px;overflow-y:auto;"></div>
+                                    </div>
+                                </div>
+                                <div class="col-md-3">
+                                    <div class="form-group mb-0">
+                                        <label class="small">Batches</label>
+                                        <input type="number" class="form-control form-control-sm" id="offeringBatchCount" 
+                                               value="1" min="1" max="10">
+                                    </div>
+                                </div>
+                                <div class="col-md-2">
+                                    <div class="form-group mb-0">
+                                        <label class="small">Capacity/Batch</label>
+                                        <input type="number" class="form-control form-control-sm" id="offeringCapacity" 
+                                               value="30" min="1" max="100">
+                                    </div>
+                                </div>
+                                <div class="col-md-2">
+                                    <button type="submit" class="btn btn-success btn-sm btn-block">
+                                        <i class="fas fa-plus"></i> Add
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+                
+                <!-- Existing Offerings List -->
+                <div class="card card-outline card-info">
+                    <div class="card-header py-2">
+                        <h6 class="mb-0"><i class="fas fa-list mr-1"></i>Current Offerings</h6>
+                    </div>
+                    <div class="card-body p-0">
+                        <table class="table table-sm table-hover mb-0" id="offeringsTable">
+                            <thead class="thead-light">
+                                <tr>
+                                    <th>Course</th>
+                                    <th>Title</th>
+                                    <th>Batches</th>
+                                    <th>Capacity</th>
+                                    <th>Total</th>
+                                    <th>Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody id="offeringsTableBody">
+                                <tr class="loading-row">
+                                    <td colspan="6" class="text-center py-3 text-muted">
+                                        Select a placeholder to view offerings
+                                    </td>
+                                </tr>
+                            </tbody>
+                            <tfoot class="bg-light">
+                                <tr>
+                                    <td colspan="4" class="text-right"><strong>Total Capacity:</strong></td>
+                                    <td><strong id="totalCapacity">0</strong></td>
+                                    <td>
+                                        <span id="capacityStatus"></span>
+                                    </td>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock content %}
+
+{% block custom_js %}
+<script>
+$(document).ready(function() {
+    const studentCount = {{ student_count|default:0 }};
+    
+    // Auto-submit on filter change
+    $('#semesterSelect, #programTypeFilter, #branchFilter, #batchFilter').on('change', function() {
+        $('#filterForm').submit();
+    });
+    
+    // Open assignment modal
+    $('.assign-btn').on('click', function() {
+        const code = $(this).data('course');
+        const title = $(this).data('title');
+        $('#modalCourseCode').val(code);
+        $('#modalCourseDisplay').val(code + ' - ' + title);
+        $('.batch-checkbox').prop('checked', false);
+        $('#modalFaculty').val('');
+    });
+    
+    // Manage offerings modal
+    $('.manage-offerings-btn').on('click', function() {
+        const planId = $(this).data('plan-id');
+        const courseCode = $(this).data('course');
+        const type = $(this).data('type');
+        
+        $('#offeringPlanId').val(planId);
+        $('#offeringSlotName').text(courseCode + ' (' + type + ')');
+        
+        loadOfferings(planId);
+    });
+    
+    function loadOfferings(planId) {
+        $.get("{% url 'api_get_elective_offerings' %}", {plan_id: planId}, function(data) {
+            const tbody = $('#offeringsTableBody');
+            tbody.empty();
+            
+            let totalCap = 0;
+            if (data.offerings && data.offerings.length > 0) {
+                data.offerings.forEach(function(o) {
+                    const cap = o.batch_count * o.capacity_per_batch;
+                    totalCap += cap;
+                    tbody.append(`
+                        <tr data-offering-id="${o.id}">
+                            <td><strong>${o.course_code}</strong></td>
+                            <td>${o.course_title}</td>
+                            <td>${o.batch_count}</td>
+                            <td>${o.capacity_per_batch}</td>
+                            <td><strong>${cap}</strong></td>
+                            <td>
+                                <button type="button" class="btn btn-xs btn-danger delete-offering" data-id="${o.id}">
+                                    <i class="fas fa-times"></i>
+                                </button>
+                            </td>
+                        </tr>
+                    `);
+                });
+            } else {
+                tbody.html('<tr><td colspan="6" class="text-center text-muted py-3">No courses offered yet</td></tr>');
+            }
+            
+            $('#totalCapacity').text(totalCap);
+            updateCapacityStatus(totalCap, studentCount);
+        });
+    }
+    
+    function updateCapacityStatus(capacity, students) {
+        const status = $('#capacityStatus');
+        if (students === 0) {
+            status.html('<span class="badge badge-secondary">No students</span>');
+        } else if (capacity >= students) {
+            status.html('<span class="badge badge-success"><i class="fas fa-check mr-1"></i>Sufficient (' + capacity + ' >= ' + students + ')</span>');
+        } else {
+            status.html('<span class="badge badge-danger"><i class="fas fa-exclamation mr-1"></i>Insufficient (' + capacity + ' < ' + students + ')</span>');
+        }
+    }
+    
+    // Course search for offerings
+    let offeringSearchTimeout = null;
+    $('#offeringCourseSearch').on('input', function() {
+        const query = $(this).val().trim();
+        const dropdown = $('#offeringCourseDropdown');
+        
+        if (offeringSearchTimeout) clearTimeout(offeringSearchTimeout);
+        
+        if (query.length < 2) {
+            dropdown.removeClass('show').empty();
+            return;
+        }
+        
+        offeringSearchTimeout = setTimeout(function() {
+            $.get("{% url 'api_search_courses' %}", {q: query, include_placeholders: 'false', limit: 10}, function(data) {
+                dropdown.empty();
+                if (data.courses && data.courses.length > 0) {
+                    data.courses.forEach(function(c) {
+                        dropdown.append(`
+                            <a class="dropdown-item offering-course-option" href="#" 
+                               data-code="${c.course_code}" data-title="${c.title}">
+                                <strong>${c.course_code}</strong> - ${c.title}
+                                <br><small class="text-muted">${c.credits} cr</small>
+                            </a>
+                        `);
+                    });
+                } else {
+                    dropdown.append('<span class="dropdown-item text-muted">No courses found</span>');
+                }
+                dropdown.addClass('show');
+            });
+        }, 300);
+    });
+    
+    $(document).on('click', '.offering-course-option', function(e) {
+        e.preventDefault();
+        $('#offeringCourseCode').val($(this).data('code'));
+        $('#offeringCourseSearch').val($(this).data('code') + ' - ' + $(this).data('title'));
+        $('#offeringCourseDropdown').removeClass('show');
+    });
+    
+    // Add offering
+    $('#addOfferingForm').on('submit', function(e) {
+        e.preventDefault();
+        
+        const planId = $('#offeringPlanId').val();
+        const courseCode = $('#offeringCourseCode').val();
+        const batchCount = $('#offeringBatchCount').val();
+        const capacity = $('#offeringCapacity').val();
+        const faculty = $('#offeringFaculty').val();
+        const semesterId = $('#offeringSemesterId').val();
+        
+        if (!courseCode) {
+            alert('Please select a course');
+            return;
+        }
+        
+        $.post("{% url 'api_add_elective_offering' %}", {
+            plan_id: planId,
+            course_code: courseCode,
+            batch_count: batchCount,
+            capacity_per_batch: capacity,
+            faculty_id: faculty,
+            semester_id: semesterId,
+            csrfmiddlewaretoken: '{{ csrf_token }}'
+        }, function(data) {
+            if (data.success) {
+                $('#offeringCourseSearch').val('');
+                $('#offeringCourseCode').val('');
+                $('#offeringBatchCount').val(1);
+                $('#offeringCapacity').val(30);
+                $('#offeringFaculty').val('');
+                loadOfferings(planId);
+            } else {
+                alert(data.error || 'Error adding offering');
+            }
+        });
+    });
+    
+    // Delete offering
+    $(document).on('click', '.delete-offering', function() {
+        const offeringId = $(this).data('id');
+        const planId = $('#offeringPlanId').val();
+        
+        if (!confirm('Remove this course offering?')) return;
+        
+        $.post("{% url 'api_remove_elective_offering' %}", {
+            offering_id: offeringId,
+            csrfmiddlewaretoken: '{{ csrf_token }}'
+        }, function(data) {
+            if (data.success) {
+                loadOfferings(planId);
+            } else {
+                alert(data.error || 'Error removing offering');
+            }
+        });
+    });
+    
+    // Close dropdowns on outside click
+    $(document).on('click', function(e) {
+        if (!$(e.target).closest('#offeringCourseSearch, #offeringCourseDropdown').length) {
+            $('#offeringCourseDropdown').removeClass('show');
+        }
+    });
+});
+</script>
+{% endblock custom_js %}

@@ -53,7 +53,7 @@
                 </li>
 
                 <!-- Student Management -->
-                <li class="nav-item has-treeview {% if 'student/add' in request.path or 'student/manage' in request.path or 'student/edit' in request.path or 'student/bulk-upload' in request.path %}menu-open{% endif %}">
+                <li class="nav-item has-treeview {% if 'student/add' in request.path or 'student/manage' in request.path or 'student/edit' in request.path or 'student/bulk-upload' in request.path or 'promotions' in request.path %}menu-open{% endif %}">
                     <a href="#" class="nav-link">
                         <i class="nav-icon fas fa-user-graduate"></i>
                         <p>Students <i class="fas fa-angle-left right"></i></p>
@@ -75,6 +75,12 @@
                             <a href="{% url 'manage_student' %}" class="nav-link {% if 'student/manage' in request.path %}active{% endif %}">
                                 <i class="far fa-circle nav-icon"></i>
                                 <p>Manage Students</p>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="{% url 'bulk_promote_semester' %}" class="nav-link {% if 'promotions/bulk' in request.path %}active{% endif %}">
+                                <i class="far fa-circle nav-icon"></i>
+                                <p>Bulk Promotion</p>
                             </a>
                         </li>
                     </ul>
@@ -110,6 +116,12 @@
                     </a>
                     <ul class="nav nav-treeview">
                         <li class="nav-item">
+                            <a href="{% url 'semester_course_assignment' %}" class="nav-link {% if 'semester/course-assignment' in request.path %}active{% endif %}">
+                                <i class="far fa-circle nav-icon text-warning"></i>
+                                <p>Semester Assignment</p>
+                            </a>
+                        </li>
+                        <li class="nav-item">
                             <a href="{% url 'add_course_assignment' %}" class="nav-link {% if 'course-assignment/add' in request.path %}active{% endif %}">
                                 <i class="far fa-circle nav-icon"></i>
                                 <p>Add Assignment</p>
@@ -125,7 +137,7 @@
                 </li>
 
                 <!-- Academic Settings -->
-                <li class="nav-item has-treeview {% if 'academic-year' in request.path or 'regulation' in request.path or 'session' in request.path or 'semester' in request.path %}menu-open{% endif %}">
+                <li class="nav-item has-treeview {% if 'academic-year' in request.path or 'regulation' in request.path or 'session' in request.path or 'semester' in request.path or 'program-batches' in request.path %}menu-open{% endif %}">
                     <a href="#" class="nav-link">
                         <i class="nav-icon fas fa-cog"></i>
                         <p>Academic <i class="fas fa-angle-left right"></i></p>
@@ -138,21 +150,9 @@
                             </a>
                         </li>
                         <li class="nav-item">
-                            <a href="{% url 'manage_academic_year' %}" class="nav-link {% if 'academic-year/manage' in request.path %}active{% endif %}">
+                            <a href="{% url 'manage_academic_year' %}" class="nav-link {% if 'academic-year/manage' in request.path or 'semester' in request.path %}active{% endif %}">
                                 <i class="far fa-circle nav-icon"></i>
-                                <p>Manage Years</p>
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a href="{% url 'add_semester' %}" class="nav-link {% if 'semester/add' in request.path %}active{% endif %}">
-                                <i class="far fa-circle nav-icon"></i>
-                                <p>Add Semester</p>
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a href="{% url 'manage_semester' %}" class="nav-link {% if 'semester/manage' in request.path %}active{% endif %}">
-                                <i class="far fa-circle nav-icon"></i>
-                                <p>Manage Semesters</p>
+                                <p>Manage Years & Semesters</p>
                             </a>
                         </li>
                         <li class="nav-item">
@@ -177,6 +177,12 @@
                             <a href="{% url 'manage_programs' %}" class="nav-link {% if 'program/manage' in request.path %}active{% endif %}">
                                 <i class="far fa-circle nav-icon"></i>
                                 <p>Manage Programs</p>
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a href="{% url 'manage_program_batches' %}" class="nav-link {% if 'program-batches' in request.path %}active{% endif %}">
+                                <i class="far fa-circle nav-icon text-info"></i>
+                                <p>Manage Batches</p>
                             </a>
                         </li>
                     </ul>
