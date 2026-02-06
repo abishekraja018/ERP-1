@@ -771,21 +771,86 @@ def staff_view_timetable(request):
 
 @login_required
 def staff_list_structured_qps(request):
-    """List all structured question papers created by faculty"""
+    """List all structured question papers and assignments for faculty"""
+    from datetime import date
+    
     if not check_faculty_permission(request.user):
         messages.error(request, "Access Denied. Faculty privileges required.")
         return redirect('/')
     
     faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    
+    # Get faculty's QPs
     qps = StructuredQuestionPaper.objects.filter(faculty=faculty).select_related(
         'course', 'academic_year', 'semester', 'regulation'
     ).order_by('-created_at')
     
+    # Get pending assignments (not yet completed)
+    pending_assignments = QuestionPaperAssignment.objects.filter(
+        assigned_faculty=faculty,
+        status__in=['ASSIGNED', 'IN_PROGRESS']
+    ).select_related('course', 'academic_year', 'semester', 'regulation').order_by('deadline')
+    
+    # Count stats for dashboard
+    draft_count = qps.filter(status='DRAFT').count()
+    submitted_count = qps.filter(status='SUBMITTED').count()
+    approved_count = qps.filter(status='APPROVED').count()
+    uploaded_count = qps.filter(is_uploaded=True).count()
+    
     context = {
         'qps': qps,
-        'page_title': 'My Structured Question Papers'
+        'pending_assignments': pending_assignments,
+        'draft_count': draft_count,
+        'submitted_count': submitted_count,
+        'approved_count': approved_count,
+        'uploaded_count': uploaded_count,
+        'page_title': 'Question Paper Dashboard'
     }
     return render(request, "staff_template/list_structured_qps.html", context)
+
+
+@login_required
+def staff_upload_qp(request):
+    """Upload a question paper document directly"""
+    from main_app.forms import UploadQuestionPaperForm
+    
+    if not check_faculty_permission(request.user):
+        messages.error(request, "Access Denied. Faculty privileges required.")
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    
+    if request.method == 'POST':
+        form = UploadQuestionPaperForm(request.POST, request.FILES, faculty=faculty)
+        if form.is_valid():
+            try:
+                qp = StructuredQuestionPaper(
+                    faculty=faculty,
+                    course=form.cleaned_data['course'],
+                    academic_year=form.cleaned_data['academic_year'],
+                    semester=form.cleaned_data['semester'],
+                    regulation=form.cleaned_data['regulation'],
+                    exam_month_year=form.cleaned_data['exam_month_year'],
+                    uploaded_document=form.cleaned_data['uploaded_document'],
+                    is_uploaded=True,
+                    status='DRAFT'
+                )
+                qp.save()
+                
+                messages.success(request, f"Question paper uploaded successfully for {qp.course.course_code}!")
+                return redirect('staff_list_structured_qps')
+            except Exception as e:
+                messages.error(request, f"Error uploading question paper: {str(e)}")
+        else:
+            messages.error(request, "Please correct the errors in the form.")
+    else:
+        form = UploadQuestionPaperForm(faculty=faculty)
+    
+    context = {
+        'form': form,
+        'page_title': 'Upload Question Paper'
+    }
+    return render(request, "staff_template/upload_qp.html", context)
 
 
 @login_required
@@ -906,7 +971,7 @@ def staff_edit_structured_qp(request, qp_id):
     faculty = get_object_or_404(Faculty_Profile, user=request.user)
     qp = get_object_or_404(StructuredQuestionPaper, id=qp_id, faculty=faculty)
     
-    if qp.status != 'DRAFT':
+    if qp.status not in ['DRAFT', 'REJECTED']:
         messages.warning(request, "Cannot edit submitted question paper.")
         return redirect('staff_preview_structured_qp', qp_id=qp.id)
     
@@ -995,6 +1060,9 @@ def staff_preview_structured_qp(request, qp_id):
         'l1_l2_total': 0,
         'l3_l4_total': 0,
         'l5_l6_total': 0,
+        'l1_l2_percentage': 0,
+        'l3_l4_percentage': 0,
+        'l5_l6_percentage': 0,
     }
     
     all_questions = qp.questions.all()
@@ -1035,14 +1103,15 @@ def staff_preview_structured_qp(request, qp_id):
     if part_c_questions.count() != 1:
         validation_errors.append(f"Part C should have exactly 1 question (found {part_c_questions.count()})")
     
-    if distribution['l1_l2_percentage'] < 20 or distribution['l1_l2_percentage'] > 35:
-        validation_errors.append(f"L1+L2 should be 20-35% (currently {distribution['l1_l2_percentage']:.1f}%)")
-    if distribution['l3_l4_percentage'] < 40:
-        validation_errors.append(f"L3+L4 should be ≥40% (currently {distribution['l3_l4_percentage']:.1f}%)")
-    if distribution['l5_l6_percentage'] < 15 or distribution['l5_l6_percentage'] > 25:
-        validation_errors.append(f"L5+L6 should be 15-25% (currently {distribution['l5_l6_percentage']:.1f}%)")
+    if total_marks > 0:
+        if distribution['l1_l2_percentage'] < 20 or distribution['l1_l2_percentage'] > 35:
+            validation_errors.append(f"L1+L2 should be 20-35% (currently {distribution['l1_l2_percentage']:.1f}%)")
+        if distribution['l3_l4_percentage'] < 40:
+            validation_errors.append(f"L3+L4 should be ≥40% (currently {distribution['l3_l4_percentage']:.1f}%)")
+        if distribution['l5_l6_percentage'] < 15 or distribution['l5_l6_percentage'] > 25:
+            validation_errors.append(f"L5+L6 should be 15-25% (currently {distribution['l5_l6_percentage']:.1f}%)")
     
-    can_submit = len(validation_errors) == 0 and qp.status == 'DRAFT'
+    can_submit = len(validation_errors) == 0 and qp.status in ['DRAFT', 'REJECTED']
     
     context = {
         'qp': qp,
@@ -1070,54 +1139,18 @@ def staff_submit_structured_qp(request, qp_id):
     faculty = get_object_or_404(Faculty_Profile, user=request.user)
     qp = get_object_or_404(StructuredQuestionPaper, id=qp_id, faculty=faculty)
     
-    if qp.status != 'DRAFT':
+    if qp.status not in ['DRAFT', 'REJECTED']:
         messages.warning(request, "Question paper already submitted.")
-        return redirect('staff_preview_structured_qp', qp_id=qp.id)
-    
-    # Generate document
-    try:
-        from docx import Document
-        from django.core.files.base import ContentFile
-        import io
-        
-        doc = Document()
-        doc.add_heading(f'{qp.course.course_code} - {qp.course.course_name}', 0)
-        doc.add_paragraph(f'Regulation: {qp.regulation.name}')
-        doc.add_paragraph(f'Exam: {qp.exam_month_year}')
-        doc.add_paragraph(f'Duration: 3 hrs | Max Marks: 100')
-        
-        # Add questions
-        doc.add_heading('PART A - Short Answer (10 × 2 = 20 marks)', level=1)
-        for q in qp.questions.filter(part='A').order_by('question_number'):
-            doc.add_paragraph(f'{q.question_number}. {q.question_text} [{q.course_outcome}: {q.bloom_level}]')
-        
-        doc.add_heading('PART B - Descriptive (5 × 13 = 65 marks)', level=1)
-        for pair_num in range(11, 16):
-            questions = qp.questions.filter(part='B', or_pair_number=pair_num)
-            if questions.exists():
-                doc.add_paragraph(f'{pair_num}. (OR)')
-                for q in questions:
-                    doc.add_paragraph(f'  {q.option_label} {q.question_text} [{q.course_outcome}: {q.bloom_level}]')
-        
-        doc.add_heading('PART C - Problem Solving (1 × 15 = 15 marks)', level=1)
-        for q in qp.questions.filter(part='C'):
-            doc.add_paragraph(f'16. {q.question_text} [{q.course_outcome}: {q.bloom_level}]')
-        
-        # Save to file
-        buffer = io.BytesIO()
-        doc.save(buffer)
-        buffer.seek(0)
-        
-        filename = f'QP_{qp.course.course_code}_{qp.exam_month_year.replace("/", "_")}.docx'
-        qp.generated_document.save(filename, ContentFile(buffer.read()), save=False)
-        
-    except Exception as e:
-        messages.error(request, f"Error generating document: {str(e)}")
         return redirect('staff_preview_structured_qp', qp_id=qp.id)
     
     qp.status = 'SUBMITTED'
     qp.submitted_at = timezone.now()
     qp.save()
+    
+    # Update linked assignment status if exists
+    if qp.qp_assignment:
+        qp.qp_assignment.status = 'SUBMITTED'
+        qp.qp_assignment.save()
     
     messages.success(request, "Question paper submitted successfully!")
     return redirect('staff_list_structured_qps')
@@ -1549,3 +1582,436 @@ def staff_download_structured_qp(request, qp_id):
     
     from django.http import FileResponse
     return FileResponse(qp.generated_document.open('rb'), as_attachment=True, filename=qp.generated_document.name.split('/')[-1])
+
+
+@login_required
+def staff_manage_qp_answers(request, qp_id):
+    """Page for managing answers for each question using AI generation"""
+    if not check_faculty_permission(request.user):
+        messages.error(request, "Access Denied.")
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    qp = get_object_or_404(StructuredQuestionPaper, id=qp_id, faculty=faculty)
+    
+    # Get questions by part
+    part_a_questions = qp.questions.filter(part='A').order_by('question_number')
+    part_b_questions = qp.questions.filter(part='B').order_by('question_number', 'option_label')
+    part_c_questions = qp.questions.filter(part='C').order_by('question_number')
+    
+    # Group Part B questions by OR pairs
+    part_b_pairs = []
+    for pair_num in [11, 12, 13, 14, 15]:
+        pair_questions = part_b_questions.filter(or_pair_number=pair_num).order_by('option_label')
+        if pair_questions.exists():
+            part_b_pairs.append((pair_num, list(pair_questions)))
+    
+    # Count answered questions
+    all_questions = qp.questions.all()
+    answered_count = all_questions.exclude(answer='').exclude(answer__isnull=True).count()
+    total_questions = all_questions.count()
+    
+    context = {
+        'page_title': f'Manage Answers - {qp.course.course_code}',
+        'qp': qp,
+        'part_a_questions': part_a_questions,
+        'part_b_pairs': part_b_pairs,
+        'part_c_questions': part_c_questions,
+        'answered_count': answered_count,
+        'total_questions': total_questions,
+    }
+    
+    return render(request, 'staff_template/manage_qp_answers.html', context)
+
+
+@login_required
+@csrf_exempt
+def staff_generate_answer_options(request):
+    """AJAX endpoint to generate AI answer options for a question"""
+    if not check_faculty_permission(request.user):
+        return JsonResponse({'error': 'Access denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST method required'}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        question_text = data.get('question', '').strip()
+        marks = int(data.get('marks', 2))
+        part_type = data.get('part', 'A')
+        course_name = data.get('course_name', '')
+        
+        if not question_text:
+            return JsonResponse({'error': 'Question text is required'}, status=400)
+        
+        from .utils.ai_answer_generator import generate_answer_options
+        
+        answers = generate_answer_options(
+            question_text=question_text,
+            marks=marks,
+            part_type=part_type,
+            course_name=course_name,
+            num_options=4
+        )
+        
+        return JsonResponse({'answers': answers})
+        
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@login_required
+def staff_download_answer_key(request, qp_id):
+    """Download answer key for a structured question paper"""
+    if not check_faculty_permission(request.user):
+        messages.error(request, "Access Denied.")
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    qp = get_object_or_404(StructuredQuestionPaper, id=qp_id, faculty=faculty)
+    
+    # Check if any answers exist
+    questions_with_answers = qp.questions.exclude(answer='').exclude(answer__isnull=True)
+    if not questions_with_answers.exists():
+        messages.warning(request, "No answers have been added to this question paper yet.")
+        return redirect('staff_preview_structured_qp', qp_id=qp.id)
+    
+    # Generate answer key document
+    from docx import Document
+    from docx.shared import Inches, Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.table import WD_TABLE_ALIGNMENT
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    import io
+    
+    doc = Document()
+    
+    # Set document margins
+    for section in doc.sections:
+        section.top_margin = Inches(0.5)
+        section.bottom_margin = Inches(0.5)
+        section.left_margin = Inches(0.75)
+        section.right_margin = Inches(0.75)
+    
+    # Title
+    title_para = doc.add_paragraph()
+    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_run = title_para.add_run("ANSWER KEY")
+    title_run.font.bold = True
+    title_run.font.size = Pt(16)
+    title_run.font.name = 'Arial'
+    
+    # Course details
+    details_para = doc.add_paragraph()
+    details_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    details_run = details_para.add_run(f"{qp.course.course_code} - {qp.course.title}")
+    details_run.font.bold = True
+    details_run.font.size = Pt(12)
+    details_run.font.name = 'Arial'
+    
+    exam_para = doc.add_paragraph()
+    exam_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    exam_run = exam_para.add_run(f"Examination: {qp.exam_month_year}")
+    exam_run.font.size = Pt(11)
+    exam_run.font.name = 'Arial'
+    
+    doc.add_paragraph()  # Spacing
+    
+    # Part A
+    part_a_questions = qp.questions.filter(part='A').order_by('question_number')
+    if part_a_questions.exists():
+        part_a_title = doc.add_paragraph()
+        part_a_run = part_a_title.add_run("PART A - Short Answers (2 marks each)")
+        part_a_run.font.bold = True
+        part_a_run.font.size = Pt(12)
+        part_a_run.font.name = 'Arial'
+        part_a_run.font.underline = True
+        
+        for q in part_a_questions:
+            # Question
+            q_para = doc.add_paragraph()
+            q_run = q_para.add_run(f"Q{q.question_number}. {q.question_text}")
+            q_run.font.bold = True
+            q_run.font.size = Pt(11)
+            q_run.font.name = 'Arial'
+            
+            # Answer
+            if q.answer:
+                a_para = doc.add_paragraph()
+                a_run = a_para.add_run(f"Answer: {q.answer}")
+                a_run.font.size = Pt(11)
+                a_run.font.name = 'Arial'
+            else:
+                a_para = doc.add_paragraph()
+                a_run = a_para.add_run("Answer: [Not provided]")
+                a_run.font.size = Pt(11)
+                a_run.font.name = 'Arial'
+                a_run.font.italic = True
+            
+            doc.add_paragraph()  # Spacing
+    
+    # Part B
+    part_b_questions = qp.questions.filter(part='B').order_by('or_pair_number', 'option_label')
+    if part_b_questions.exists():
+        part_b_title = doc.add_paragraph()
+        part_b_run = part_b_title.add_run("PART B - Descriptive Answers (13 marks each)")
+        part_b_run.font.bold = True
+        part_b_run.font.size = Pt(12)
+        part_b_run.font.name = 'Arial'
+        part_b_run.font.underline = True
+        
+        for q in part_b_questions:
+            # Question
+            q_label = f"Q{q.or_pair_number}{q.option_label}" if q.option_label else f"Q{q.question_number}"
+            q_para = doc.add_paragraph()
+            q_run = q_para.add_run(f"{q_label}. {q.question_text}")
+            q_run.font.bold = True
+            q_run.font.size = Pt(11)
+            q_run.font.name = 'Arial'
+            
+            # Answer
+            if q.answer:
+                a_para = doc.add_paragraph()
+                a_run = a_para.add_run(f"Answer: {q.answer}")
+                a_run.font.size = Pt(11)
+                a_run.font.name = 'Arial'
+            else:
+                a_para = doc.add_paragraph()
+                a_run = a_para.add_run("Answer: [Not provided]")
+                a_run.font.size = Pt(11)
+                a_run.font.name = 'Arial'
+                a_run.font.italic = True
+            
+            doc.add_paragraph()  # Spacing
+    
+    # Part C
+    part_c_questions = qp.questions.filter(part='C')
+    if part_c_questions.exists():
+        part_c_title = doc.add_paragraph()
+        part_c_run = part_c_title.add_run("PART C - Problem Solving (15 marks)")
+        part_c_run.font.bold = True
+        part_c_run.font.size = Pt(12)
+        part_c_run.font.name = 'Arial'
+        part_c_run.font.underline = True
+        
+        for q in part_c_questions:
+            # Question
+            q_para = doc.add_paragraph()
+            q_run = q_para.add_run(f"Q16. {q.question_text}")
+            q_run.font.bold = True
+            q_run.font.size = Pt(11)
+            q_run.font.name = 'Arial'
+            
+            # Answer
+            if q.answer:
+                a_para = doc.add_paragraph()
+                a_run = a_para.add_run(f"Answer: {q.answer}")
+                a_run.font.size = Pt(11)
+                a_run.font.name = 'Arial'
+            else:
+                a_para = doc.add_paragraph()
+                a_run = a_para.add_run("Answer: [Not provided]")
+                a_run.font.size = Pt(11)
+                a_run.font.name = 'Arial'
+                a_run.font.italic = True
+    
+    # Save to response
+    doc_io = io.BytesIO()
+    doc.save(doc_io)
+    doc_io.seek(0)
+    
+    from django.http import FileResponse
+    filename = f'Answer_Key_{qp.course.course_code}_{qp.exam_month_year.replace("/", "_")}.docx'
+    return FileResponse(doc_io, as_attachment=True, filename=filename)
+
+
+@login_required
+@csrf_exempt
+def staff_save_question_answer(request):
+    """AJAX endpoint to save an answer for a question"""
+    if not check_faculty_permission(request.user):
+        return JsonResponse({'error': 'Access denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST method required'}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        question_id = data.get('question_id')
+        answer = data.get('answer', '').strip()
+        
+        if not question_id:
+            return JsonResponse({'error': 'Question ID is required'}, status=400)
+        
+        faculty = get_object_or_404(Faculty_Profile, user=request.user)
+        question = get_object_or_404(QPQuestion, id=question_id, question_paper__faculty=faculty)
+        
+        question.answer = answer
+        question.save()
+        
+        return JsonResponse({'success': True, 'message': 'Answer saved successfully'})
+        
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@login_required
+def staff_delete_qp_question(request, question_id):
+    """Delete a question from a question paper (only for DRAFT status)"""
+    if not check_faculty_permission(request.user):
+        messages.error(request, "Access Denied.")
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    question = get_object_or_404(QPQuestion, id=question_id, question_paper__faculty=faculty)
+    
+    qp = question.question_paper
+    
+    # Only allow deletion for draft or rejected QPs
+    if qp.status not in ['DRAFT', 'REJECTED']:
+        messages.error(request, "Cannot delete questions from a submitted question paper.")
+        return redirect('staff_preview_structured_qp', qp_id=qp.id)
+    
+    # Store info for message
+    part = question.part
+    q_num = question.question_number
+    
+    # Delete the question
+    question.delete()
+    
+    messages.success(request, f"Question {q_num} from Part {part} deleted successfully.")
+    
+    # Redirect back to the referring page or preview
+    referer = request.META.get('HTTP_REFERER')
+    if referer:
+        return redirect(referer)
+    return redirect('staff_preview_structured_qp', qp_id=qp.id)
+
+
+@login_required
+@csrf_exempt
+def staff_delete_qp_question_ajax(request):
+    """AJAX endpoint to delete a question from a question paper"""
+    if not check_faculty_permission(request.user):
+        return JsonResponse({'error': 'Access denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST method required'}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        question_id = data.get('question_id')
+        
+        if not question_id:
+            return JsonResponse({'error': 'Question ID is required'}, status=400)
+        
+        faculty = get_object_or_404(Faculty_Profile, user=request.user)
+        question = get_object_or_404(QPQuestion, id=question_id, question_paper__faculty=faculty)
+        
+        qp = question.question_paper
+        
+        # Only allow deletion for draft or rejected QPs
+        if qp.status not in ['DRAFT', 'REJECTED']:
+            return JsonResponse({'error': 'Cannot delete questions from a submitted question paper.'}, status=403)
+        
+        # Store info for response
+        part = question.part
+        q_num = question.question_number
+        
+        # Delete the question
+        question.delete()
+        
+        return JsonResponse({
+            'success': True, 
+            'message': f'Question {q_num} from Part {part} deleted successfully.'
+        })
+        
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+
+@login_required
+def staff_delete_structured_qp(request, qp_id):
+    """Delete an entire structured question paper (only for DRAFT status)"""
+    if not check_faculty_permission(request.user):
+        messages.error(request, "Access Denied.")
+        return redirect('/')
+    
+    faculty = get_object_or_404(Faculty_Profile, user=request.user)
+    qp = get_object_or_404(StructuredQuestionPaper, id=qp_id, faculty=faculty)
+    
+    # Only allow deletion for draft or rejected QPs
+    if qp.status not in ['DRAFT', 'REJECTED']:
+        messages.error(request, "Cannot delete a submitted or approved question paper. Only draft or rejected question papers can be deleted.")
+        return redirect('staff_list_structured_qps')
+    
+    if request.method == 'POST':
+        # Store info for message
+        course_code = qp.course.course_code
+        exam_month_year = qp.exam_month_year
+        
+        # Delete all associated questions first, then the QP
+        qp.questions.all().delete()
+        qp.delete()
+        
+        messages.success(request, f"Question paper for {course_code} ({exam_month_year}) deleted successfully.")
+        return redirect('staff_list_structured_qps')
+    
+    # GET request - show confirmation page
+    context = {
+        'qp': qp,
+        'page_title': 'Delete Question Paper'
+    }
+    return render(request, "staff_template/delete_structured_qp_confirm.html", context)
+
+
+@login_required
+@csrf_exempt
+def staff_delete_structured_qp_ajax(request):
+    """AJAX endpoint to delete an entire structured question paper"""
+    if not check_faculty_permission(request.user):
+        return JsonResponse({'error': 'Access denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST method required'}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        qp_id = data.get('qp_id')
+        
+        if not qp_id:
+            return JsonResponse({'error': 'Question Paper ID is required'}, status=400)
+        
+        faculty = get_object_or_404(Faculty_Profile, user=request.user)
+        qp = get_object_or_404(StructuredQuestionPaper, id=qp_id, faculty=faculty)
+        
+        # Only allow deletion for draft or rejected QPs
+        if qp.status not in ['DRAFT', 'REJECTED']:
+            return JsonResponse({'error': 'Cannot delete a submitted or approved question paper. Only draft or rejected question papers can be deleted.'}, status=403)
+        
+        # Store info for response
+        course_code = qp.course.course_code
+        exam_month_year = qp.exam_month_year
+        
+        # Delete all associated questions first, then the QP
+        qp.questions.all().delete()
+        qp.delete()
+        
+        return JsonResponse({
+            'success': True, 
+            'message': f'Question paper for {course_code} ({exam_month_year}) deleted successfully.'
+        })
+        
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=500)
+
+

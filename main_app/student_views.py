@@ -25,7 +25,7 @@ from .models import (
     Account_User, Student_Profile, Course_Assignment, Attendance, Course,
     LeaveRequest, Feedback, Notification, Event, EventRegistration,
     Student_Achievement, Announcement, Timetable, TimetableEntry, TimeSlot,
-    AcademicYear, Semester
+    AcademicYear, Semester, ExamSchedule, StructuredQuestionPaper, QPQuestion
 )
 from .utils.web_scrapper import fetch_acoe_updates
 from .utils.cir_scrapper import fetch_cir_ticker_announcements
@@ -630,5 +630,147 @@ def student_view_timetable(request):
         'page_title': f'My Timetable - Year {student_year} Batch {student.batch_label}'
     }
     return render(request, "student_template/student_timetable.html", context)
+
+
+# =============================================================================
+# RELEASED QUESTION PAPERS
+# =============================================================================
+
+@login_required
+def student_view_released_qps(request):
+    """View all released question papers for the student"""
+    if not check_student_permission(request.user):
+        messages.error(request, "Access Denied. Student privileges required.")
+        return redirect('/')
+    
+    student = get_object_or_404(Student_Profile, user=request.user)
+    
+    # Get released exams for student's batch
+    # Only show completed exams where QP is set to be released
+    released_schedules = ExamSchedule.objects.filter(
+        status='COMPLETED',
+        release_qp_after_exam=True,
+        batch_labels__icontains=student.batch_label
+    ).select_related(
+        'structured_qp', 'structured_qp__course', 'structured_qp__faculty__user',
+        'semester'
+    ).order_by('-exam_date')
+    
+    # Group by course/subject
+    courses_with_qps = {}
+    for schedule in released_schedules:
+        course = schedule.structured_qp.course
+        if course.id not in courses_with_qps:
+            courses_with_qps[course.id] = {
+                'course': course,
+                'schedules': []
+            }
+        courses_with_qps[course.id]['schedules'].append(schedule)
+    
+    context = {
+        'student': student,
+        'courses_with_qps': courses_with_qps.values(),
+        'page_title': 'Released Question Papers'
+    }
+    return render(request, "student_template/student_view_released_qps.html", context)
+
+
+@login_required
+def student_view_qp_detail(request, schedule_id):
+    """View a specific released question paper with questions"""
+    if not check_student_permission(request.user):
+        messages.error(request, "Access Denied. Student privileges required.")
+        return redirect('/')
+    
+    student = get_object_or_404(Student_Profile, user=request.user)
+    
+    # Get the schedule
+    schedule = get_object_or_404(
+        ExamSchedule.objects.select_related(
+            'structured_qp', 'structured_qp__course', 'structured_qp__faculty__user'
+        ),
+        id=schedule_id,
+        status='COMPLETED',
+        release_qp_after_exam=True
+    )
+    
+    # Verify student can access this QP (batch check)
+    batch_labels = schedule.get_batch_labels_list()
+    if student.batch_label not in batch_labels:
+        messages.error(request, "You don't have access to this question paper.")
+        return redirect('student_view_released_qps')
+    
+    # Get questions grouped by part
+    questions = schedule.structured_qp.questions.all().order_by('part', 'question_number', 'option_label')
+    
+    part_a_questions = questions.filter(part='A')
+    part_b_questions = questions.filter(part='B')
+    part_c_questions = questions.filter(part='C')
+    
+    # Check if answers are released
+    show_answers = schedule.is_answers_released
+    
+    context = {
+        'student': student,
+        'schedule': schedule,
+        'qp': schedule.structured_qp,
+        'part_a_questions': part_a_questions,
+        'part_b_questions': part_b_questions,
+        'part_c_questions': part_c_questions,
+        'show_answers': show_answers,
+        'page_title': f'QP - {schedule.structured_qp.course.course_code}'
+    }
+    return render(request, "student_template/student_view_qp_detail.html", context)
+
+
+@login_required
+def student_view_answer_key(request, schedule_id):
+    """View the answer key for a released question paper"""
+    if not check_student_permission(request.user):
+        messages.error(request, "Access Denied. Student privileges required.")
+        return redirect('/')
+    
+    student = get_object_or_404(Student_Profile, user=request.user)
+    
+    # Get the schedule
+    schedule = get_object_or_404(
+        ExamSchedule.objects.select_related(
+            'structured_qp', 'structured_qp__course', 'structured_qp__faculty__user'
+        ),
+        id=schedule_id,
+        status='COMPLETED',
+        release_answers_after_exam=True
+    )
+    
+    # Verify student can access this QP (batch check)
+    batch_labels = schedule.get_batch_labels_list()
+    if student.batch_label not in batch_labels:
+        messages.error(request, "You don't have access to this answer key.")
+        return redirect('student_view_released_qps')
+    
+    # Check if answers are actually released
+    if not schedule.is_answers_released:
+        messages.error(request, "Answer key is not yet available.")
+        return redirect('student_view_qp_detail', schedule_id=schedule_id)
+    
+    # Get questions with answers
+    questions = schedule.structured_qp.questions.filter(
+        answer__isnull=False
+    ).exclude(answer='').order_by('part', 'question_number', 'option_label')
+    
+    part_a_questions = questions.filter(part='A')
+    part_b_questions = questions.filter(part='B')
+    part_c_questions = questions.filter(part='C')
+    
+    context = {
+        'student': student,
+        'schedule': schedule,
+        'qp': schedule.structured_qp,
+        'part_a_questions': part_a_questions,
+        'part_b_questions': part_b_questions,
+        'part_c_questions': part_c_questions,
+        'page_title': f'Answer Key - {schedule.structured_qp.course.course_code}'
+    }
+    return render(request, "student_template/student_view_answer_key.html", context)
 
 

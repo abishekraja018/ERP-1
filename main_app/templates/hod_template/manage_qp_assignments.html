@@ -155,7 +155,17 @@
                                     </span>
                                 </td>
                                 <td>
-                                    {% if assignment.status == 'SUBMITTED' or assignment.status == 'UNDER_REVIEW' %}
+                                    {% if assignment.structured_qp %}
+                                    <!-- Has linked Structured QP -->
+                                    <a href="{% url 'hod_review_structured_qp_detail' assignment.structured_qp.id %}" class="btn btn-sm btn-primary" title="Review Structured QP">
+                                        <i class="fas fa-search"></i> Review
+                                    </a>
+                                    {% if assignment.structured_qp.generated_document %}
+                                    <a href="{% url 'hod_download_structured_qp' assignment.structured_qp.id %}" class="btn btn-sm btn-success" title="Download QP">
+                                        <i class="fas fa-download"></i>
+                                    </a>
+                                    {% endif %}
+                                    {% elif assignment.status == 'SUBMITTED' or assignment.status == 'UNDER_REVIEW' %}
                                     <a href="{% url 'review_question_paper' assignment.id %}" class="btn btn-sm btn-primary" title="Review">
                                         <i class="fas fa-search"></i> Review
                                     </a>

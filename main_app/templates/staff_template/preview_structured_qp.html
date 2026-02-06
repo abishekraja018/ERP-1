@@ -203,19 +203,37 @@
                     </div>
                 </div>
 
+                <!-- Rejection Reason Alert -->
+                {% if qp.status == 'REJECTED' and qp.hod_comments %}
+                <div class="alert alert-danger mb-4">
+                    <h5><i class="fas fa-exclamation-triangle"></i> Question Paper Rejected</h5>
+                    <strong>Reason:</strong> {{ qp.hod_comments }}
+                    <hr>
+                    <small>Please make the necessary changes and resubmit.</small>
+                </div>
+                {% endif %}
+
                 <!-- Action Buttons (after print layout) -->
                 <div style="margin-top: 20px; padding: 20px; background: white;">
+                    {% if qp.status == 'DRAFT' or qp.status == 'REJECTED' %}
                     <a href="{% url 'staff_edit_structured_qp' qp.id %}" class="btn btn-warning btn-sm">
                         <i class="fas fa-edit"></i> Edit
                     </a>
+                    {% endif %}
                     <a href="{% url 'staff_download_structured_qp' qp.id %}" class="btn btn-info btn-sm">
-                        <i class="fas fa-download"></i> Download
+                        <i class="fas fa-download"></i> Download QP
+                    </a>
+                    <a href="{% url 'staff_manage_qp_answers' qp.id %}" class="btn btn-purple btn-sm" style="background-color: #6f42c1; color: white;">
+                        <i class="fas fa-magic"></i> AI Answers
+                    </a>
+                    <a href="{% url 'staff_download_answer_key' qp.id %}" class="btn btn-success btn-sm">
+                        <i class="fas fa-key"></i> Answer Key
                     </a>
                     {% if can_submit %}
                     <form method="POST" action="{% url 'staff_submit_structured_qp' qp.id %}" style="display: inline;">
                         {% csrf_token %}
-                        <button type="submit" class="btn btn-success btn-sm" onclick="return confirm('Submit this question paper for review?')">
-                            <i class="fas fa-check"></i> Submit for Review
+                        <button type="submit" class="btn btn-primary btn-sm" onclick="return confirm('{% if qp.status == 'REJECTED' %}Resubmit{% else %}Submit{% endif %} this question paper for review?')">
+                            <i class="fas fa-check"></i> {% if qp.status == 'REJECTED' %}Resubmit for Review{% else %}Submit for Review{% endif %}
                         </button>
                     </form>
                     {% endif %}

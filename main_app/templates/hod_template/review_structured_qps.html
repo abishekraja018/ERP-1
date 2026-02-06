@@ -62,9 +62,9 @@
                                         </td>
                                         <td>
                                             <strong>{{ qp.course.course_code }}</strong><br>
-                                            <small class="text-muted">{{ qp.course.course_name|truncatewords:5 }}</small>
+                                            <small class="text-muted">{{ qp.course.title|truncatewords:5 }}</small>
                                         </td>
-                                        <td>{{ qp.regulation.regulation_name }}</td>
+                                        <td>{{ qp.regulation }}</td>
                                         <td>{{ qp.exam_month_year }}</td>
                                         <td>
                                             <span class="badge badge-{{ qp.status|lower }}">

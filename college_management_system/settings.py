@@ -165,5 +165,9 @@ EMAIL_USE_TLS = True
 
 STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
+# AI Answer Generation - Google Gemini API
+# Get your API key from: https://makersuite.google.com/app/apikey
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', 'AIzaSyBjuLEKSg_RYskDjyypZj1Cq55Pf2-SFUU')
+
 prod_db = dj_database_url.config(conn_max_age=500)
 DATABASES['default'].update(prod_db)

@@ -30,14 +30,15 @@ from .forms import (
     EventForm, LeaveApprovalForm, FeedbackReplyForm, AnnouncementForm,
     FacultyProfileEditForm, StudentProfileEditForm, AccountUserForm,
     QuestionPaperAssignmentForm, QuestionPaperReviewForm,
-    TimetableForm, TimetableEntryForm, TimeSlotForm, ProgramForm
+    TimetableForm, TimetableEntryForm, TimeSlotForm, ProgramForm,
+    ExamScheduleForm, ExamScheduleEditForm
 )
 from .models import (
     Account_User, Faculty_Profile, Student_Profile, NonTeachingStaff_Profile,
     Course, Course_Assignment, Attendance, Regulation, AcademicYear, Semester,
     Publication, Student_Achievement, Lab_Issue_Log, LeaveRequest, Feedback,
     Event, EventRegistration, Notification, Announcement, QuestionPaperAssignment,
-    Timetable, TimetableEntry, TimeSlot, Program
+    Timetable, TimetableEntry, TimeSlot, Program, ExamSchedule, StructuredQuestionPaper
 )
 from .utils.web_scrapper import fetch_acoe_updates
 from .utils.cir_scrapper import fetch_cir_ticker_announcements
@@ -1412,7 +1413,7 @@ def manage_qp_assignments(request):
     
     assignments = QuestionPaperAssignment.objects.all().select_related(
         'course', 'assigned_faculty__user', 'academic_year', 'semester'
-    ).order_by('-created_at')
+    ).prefetch_related('structured_qp').order_by('-created_at')
     
     if status_filter:
         assignments = assignments.filter(status=status_filter)
@@ -2460,12 +2461,8 @@ def hod_review_structured_qps(request):
         messages.error(request, "Access Denied. HOD privileges required.")
         return redirect('/')
     
-    hod = get_object_or_404(HOD_Profile, user=request.user)
-    
-    # Get all QPs for HOD's department courses
-    qps = StructuredQuestionPaper.objects.filter(
-        course__department=hod.department
-    ).select_related(
+    # Get all structured QPs
+    qps = StructuredQuestionPaper.objects.all().select_related(
         'faculty__user', 'course', 'academic_year', 'semester', 'regulation'
     ).order_by('-submitted_at', '-created_at')
     
@@ -2491,12 +2488,7 @@ def hod_review_structured_qp_detail(request, qp_id):
         messages.error(request, "Access Denied. HOD privileges required.")
         return redirect('/')
     
-    hod = get_object_or_404(HOD_Profile, user=request.user)
-    qp = get_object_or_404(
-        StructuredQuestionPaper, 
-        id=qp_id, 
-        course__department=hod.department
-    )
+    qp = get_object_or_404(StructuredQuestionPaper, id=qp_id)
     
     # Update status if viewing for first time
     if qp.status == 'SUBMITTED':
@@ -2542,12 +2534,7 @@ def hod_approve_structured_qp(request, qp_id):
         messages.error(request, "Access Denied. HOD privileges required.")
         return redirect('/')
     
-    hod = get_object_or_404(HOD_Profile, user=request.user)
-    qp = get_object_or_404(
-        StructuredQuestionPaper, 
-        id=qp_id, 
-        course__department=hod.department
-    )
+    qp = get_object_or_404(StructuredQuestionPaper, id=qp_id)
     
     # Validate can approve
     if qp.status == 'APPROVED':
@@ -2565,7 +2552,7 @@ def hod_approve_structured_qp(request, qp_id):
         
         qp.status = 'APPROVED'
         qp.hod_comments = comments
-        qp.reviewed_by = hod.user
+        qp.reviewed_by = request.user
         qp.reviewed_at = timezone.now()
         qp.save()
         
@@ -2578,10 +2565,10 @@ def hod_approve_structured_qp(request, qp_id):
         
         # Notify faculty
         Notification.objects.create(
-            user=qp.faculty.user,
+            recipient=qp.faculty.user,
             title='Question Paper Approved',
             message=f'Your structured question paper for {qp.course.course_code} has been approved by HOD',
-            notification_type='QP_APPROVAL'
+            notification_type='INFO'
         )
         
         messages.success(request, f"Question paper for {qp.course.course_code} approved successfully!")
@@ -2604,12 +2591,7 @@ def hod_reject_structured_qp(request, qp_id):
         messages.error(request, "Access Denied. HOD privileges required.")
         return redirect('/')
     
-    hod = get_object_or_404(HOD_Profile, user=request.user)
-    qp = get_object_or_404(
-        StructuredQuestionPaper, 
-        id=qp_id, 
-        course__department=hod.department
-    )
+    qp = get_object_or_404(StructuredQuestionPaper, id=qp_id)
     
     if qp.status == 'APPROVED':
         messages.error(request, "Cannot reject an approved question paper.")
@@ -2624,7 +2606,7 @@ def hod_reject_structured_qp(request, qp_id):
         
         qp.status = 'REJECTED'
         qp.hod_comments = rejection_reason
-        qp.reviewed_by = hod.user
+        qp.reviewed_by = request.user
         qp.reviewed_at = timezone.now()
         qp.save()
         
@@ -2637,10 +2619,10 @@ def hod_reject_structured_qp(request, qp_id):
         
         # Notify faculty
         Notification.objects.create(
-            user=qp.faculty.user,
+            recipient=qp.faculty.user,
             title='Question Paper Rejected',
             message=f'Your structured question paper for {qp.course.course_code} requires revision. Reason: {rejection_reason[:100]}',
-            notification_type='QP_REJECTION'
+            notification_type='WARNING'
         )
         
         messages.warning(request, f"Question paper rejected. Faculty has been notified.")
@@ -2663,12 +2645,7 @@ def hod_download_structured_qp(request, qp_id):
         messages.error(request, "Access Denied. HOD privileges required.")
         return redirect('/')
     
-    hod = get_object_or_404(HOD_Profile, user=request.user)
-    qp = get_object_or_404(
-        StructuredQuestionPaper, 
-        id=qp_id, 
-        course__department=hod.department
-    )
+    qp = get_object_or_404(StructuredQuestionPaper, id=qp_id)
     
     if not qp.generated_document:
         raise Http404("Document not generated yet")
@@ -2676,3 +2653,207 @@ def hod_download_structured_qp(request, qp_id):
     response = FileResponse(qp.generated_document.open('rb'), content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
     response['Content-Disposition'] = f'attachment; filename="{qp.generated_document.name.split("/")[-1]}"'
     return response
+
+
+# =============================================================================
+# EXAM SCHEDULE MANAGEMENT
+# =============================================================================
+
+@login_required
+def manage_exam_schedules(request):
+    """View and manage all exam schedules"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    # Update status of all schedules based on current time
+    schedules = ExamSchedule.objects.select_related(
+        'structured_qp', 'structured_qp__course', 'structured_qp__faculty',
+        'semester', 'scheduled_by'
+    ).order_by('-exam_date', '-start_time')
+    
+    # Update statuses
+    for schedule in schedules:
+        schedule.update_status()
+    
+    # Filter options
+    status_filter = request.GET.get('status', '')
+    course_filter = request.GET.get('course', '')
+    
+    if status_filter:
+        schedules = schedules.filter(status=status_filter)
+    if course_filter:
+        schedules = schedules.filter(structured_qp__course__id=course_filter)
+    
+    # Get courses for filter dropdown
+    courses = Course.objects.filter(
+        id__in=ExamSchedule.objects.values_list('structured_qp__course', flat=True)
+    ).distinct()
+    
+    context = {
+        'schedules': schedules,
+        'courses': courses,
+        'status_filter': status_filter,
+        'course_filter': course_filter,
+        'page_title': 'Manage Exam Schedules'
+    }
+    return render(request, 'hod_template/manage_exam_schedules.html', context)
+
+
+@login_required
+def schedule_exam(request):
+    """HOD schedules an exam for an approved question paper"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    if request.method == 'POST':
+        form = ExamScheduleForm(request.POST)
+        if form.is_valid():
+            schedule = form.save(commit=False)
+            schedule.scheduled_by = request.user
+            schedule.save()
+            
+            # Notify relevant students
+            course = schedule.structured_qp.course
+            messages.success(
+                request, 
+                f"Exam scheduled for {course.course_code} - {course.title} on {schedule.exam_date}"
+            )
+            return redirect('manage_exam_schedules')
+    else:
+        form = ExamScheduleForm()
+    
+    # Get approved QPs that don't have schedules yet
+    approved_qps = StructuredQuestionPaper.objects.filter(
+        status='APPROVED'
+    ).exclude(
+        exam_schedule__isnull=False
+    ).select_related('course', 'faculty')
+    
+    context = {
+        'form': form,
+        'approved_qps': approved_qps,
+        'page_title': 'Schedule Exam'
+    }
+    return render(request, 'hod_template/schedule_exam.html', context)
+
+
+@login_required
+def edit_exam_schedule(request, schedule_id):
+    """Edit an existing exam schedule (only if exam hasn't ended)"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    schedule = get_object_or_404(ExamSchedule, id=schedule_id)
+    
+    # Check if editable
+    if schedule.is_exam_ended:
+        messages.error(request, "Cannot edit schedule after exam has ended.")
+        return redirect('manage_exam_schedules')
+    
+    if request.method == 'POST':
+        form = ExamScheduleEditForm(request.POST, instance=schedule)
+        if form.is_valid():
+            form.save()
+            messages.success(request, "Exam schedule updated successfully.")
+            return redirect('manage_exam_schedules')
+    else:
+        form = ExamScheduleEditForm(instance=schedule)
+    
+    context = {
+        'form': form,
+        'schedule': schedule,
+        'page_title': f'Edit Exam Schedule - {schedule.structured_qp.course.course_code}'
+    }
+    return render(request, 'hod_template/edit_exam_schedule.html', context)
+
+
+@login_required
+def delete_exam_schedule(request, schedule_id):
+    """Delete an exam schedule (only if exam hasn't started)"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    schedule = get_object_or_404(ExamSchedule, id=schedule_id)
+    
+    # Only allow deletion if exam hasn't started
+    if schedule.is_exam_started:
+        messages.error(request, "Cannot delete schedule after exam has started.")
+        return redirect('manage_exam_schedules')
+    
+    course_code = schedule.structured_qp.course.course_code
+    schedule.delete()
+    messages.success(request, f"Exam schedule for {course_code} deleted successfully.")
+    return redirect('manage_exam_schedules')
+
+
+@login_required
+def view_exam_schedule_detail(request, schedule_id):
+    """View detailed information about an exam schedule"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    schedule = get_object_or_404(
+        ExamSchedule.objects.select_related(
+            'structured_qp', 'structured_qp__course', 'structured_qp__faculty',
+            'semester', 'scheduled_by'
+        ),
+        id=schedule_id
+    )
+    
+    # Update status
+    schedule.update_status()
+    
+    # Get questions for this QP
+    questions = schedule.structured_qp.questions.all().order_by('part', 'question_number')
+    
+    context = {
+        'schedule': schedule,
+        'questions': questions,
+        'page_title': f'Exam Schedule - {schedule.structured_qp.course.course_code}'
+    }
+    return render(request, 'hod_template/exam_schedule_detail.html', context)
+
+
+@login_required
+def mark_exam_completed(request, schedule_id):
+    """Manually mark an exam as completed"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    schedule = get_object_or_404(ExamSchedule, id=schedule_id)
+    
+    if request.method == 'POST':
+        schedule.status = 'COMPLETED'
+        schedule.save()
+        messages.success(request, "Exam marked as completed. QP and answers will now be visible to students.")
+        return redirect('manage_exam_schedules')
+    
+    return redirect('view_exam_schedule_detail', schedule_id=schedule_id)
+
+
+@login_required
+def cancel_exam_schedule(request, schedule_id):
+    """Cancel an exam schedule"""
+    if not check_hod_permission(request.user):
+        messages.error(request, "Access Denied. HOD privileges required.")
+        return redirect('/')
+    
+    schedule = get_object_or_404(ExamSchedule, id=schedule_id)
+    
+    if schedule.is_exam_ended:
+        messages.error(request, "Cannot cancel an exam that has already ended.")
+        return redirect('manage_exam_schedules')
+    
+    if request.method == 'POST':
+        schedule.status = 'CANCELLED'
+        schedule.save()
+        messages.warning(request, f"Exam for {schedule.structured_qp.course.course_code} has been cancelled.")
+        return redirect('manage_exam_schedules')
+    
+    return redirect('view_exam_schedule_detail', schedule_id=schedule_id)
