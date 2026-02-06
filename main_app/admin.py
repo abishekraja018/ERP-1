@@ -6,7 +6,7 @@ from .models import (
     Course, Course_Assignment, Attendance,
     Publication, Student_Achievement, Lab_Issue_Log,
     LeaveRequest, Feedback, Event, EventRegistration,
-    Notification, Announcement
+    Notification, Announcement, ExamSchedule, StructuredQuestionPaper, QPQuestion
 )
 
 
@@ -213,4 +213,48 @@ class AnnouncementAdmin(admin.ModelAdmin):
     list_filter = ('audience', 'priority', 'is_pinned', 'is_active')
     search_fields = ('title', 'content')
     raw_id_fields = ('posted_by',)
+
+
+# =============================================================================
+# EXAM SCHEDULE ADMINS
+# =============================================================================
+
+@admin.register(ExamSchedule)
+class ExamScheduleAdmin(admin.ModelAdmin):
+    list_display = ('get_course_code', 'exam_date', 'start_time', 'end_time', 'status', 'venue', 'is_qp_released')
+    list_filter = ('status', 'exam_date', 'release_qp_after_exam', 'release_answers_after_exam')
+    search_fields = ('structured_qp__course__course_code', 'structured_qp__course__title', 'venue')
+    date_hierarchy = 'exam_date'
+    raw_id_fields = ('structured_qp', 'scheduled_by', 'semester')
+    readonly_fields = ('created_at', 'updated_at')
+    
+    def get_course_code(self, obj):
+        return obj.structured_qp.course.course_code
+    get_course_code.short_description = 'Course Code'
+    get_course_code.admin_order_field = 'structured_qp__course__course_code'
+
+
+@admin.register(StructuredQuestionPaper)
+class StructuredQuestionPaperAdmin(admin.ModelAdmin):
+    list_display = ('get_course_code', 'faculty', 'exam_month_year', 'status', 'created_at')
+    list_filter = ('status', 'academic_year', 'regulation')
+    search_fields = ('course__course_code', 'course__title', 'faculty__user__full_name')
+    raw_id_fields = ('faculty', 'course', 'qp_assignment')
+    readonly_fields = ('created_at', 'updated_at', 'submitted_at', 'reviewed_at')
+    
+    def get_course_code(self, obj):
+        return obj.course.course_code
+    get_course_code.short_description = 'Course Code'
+
+
+@admin.register(QPQuestion)
+class QPQuestionAdmin(admin.ModelAdmin):
+    list_display = ('get_qp_course', 'part', 'question_number', 'course_outcome', 'bloom_level', 'marks')
+    list_filter = ('part', 'course_outcome', 'bloom_level')
+    search_fields = ('question_text', 'question_paper__course__course_code')
+    raw_id_fields = ('question_paper',)
+    
+    def get_qp_course(self, obj):
+        return obj.question_paper.course.course_code
+    get_qp_course.short_description = 'Course'
 
