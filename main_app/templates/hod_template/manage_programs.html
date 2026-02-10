@@ -74,11 +74,11 @@
                                                 <td>{{ program.specialization|default:"-" }}</td>
                                                 <td>{{ program.duration_years }} years ({{ program.total_semesters }} sem)</td>
                                                 <td>
-                                                    {% for reg in program.regulations.all %}
-                                                    <span class="badge badge-secondary">R{{ reg.year }}</span>
-                                                    {% empty %}
+                                                    {% if program.regulation %}
+                                                    <span class="badge badge-secondary">R{{ program.regulation.year }}</span>
+                                                    {% else %}
                                                     <span class="text-muted">-</span>
-                                                    {% endfor %}
+                                                    {% endif %}
                                                 </td>
                                                 <td>
                                                     {% if program.is_active %}
@@ -133,9 +133,9 @@
                                                 <td>{{ program.get_degree_display }}</td>
                                                 <td>{{ program.duration_years }} years</td>
                                                 <td>
-                                                    {% for reg in program.regulations.all %}
-                                                    <span class="badge badge-secondary">R{{ reg.year }}</span>
-                                                    {% endfor %}
+                                                    {% if program.regulation %}
+                                                    <span class="badge badge-secondary">R{{ program.regulation.year }}</span>
+                                                    {% endif %}
                                                 </td>
                                                 <td>
                                                     <a href="{% url 'edit_program' program.id %}" class="btn btn-sm btn-info">
@@ -173,9 +173,9 @@
                                                 <td>{{ program.specialization|default:"-" }}</td>
                                                 <td>{{ program.duration_years }} years</td>
                                                 <td>
-                                                    {% for reg in program.regulations.all %}
-                                                    <span class="badge badge-secondary">R{{ reg.year }}</span>
-                                                    {% endfor %}
+                                                    {% if program.regulation %}
+                                                    <span class="badge badge-secondary">R{{ program.regulation.year }}</span>
+                                                    {% endif %}
                                                 </td>
                                                 <td>
                                                     <a href="{% url 'edit_program' program.id %}" class="btn btn-sm btn-info">

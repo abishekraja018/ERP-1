@@ -40,7 +40,7 @@ from .models import (
     Publication, Student_Achievement, Lab_Issue_Log, LeaveRequest, Feedback,
     Event, EventRegistration, Notification, Announcement, QuestionPaperAssignment,
     Timetable, TimetableEntry, TimeSlot, Program, ExamSchedule, StructuredQuestionPaper,
-    RegulationCoursePlan, SemesterPromotion,
+    RegulationCoursePlan, SemesterPromotion, ProgramRegulation,
     ProgramBatch, ElectiveVertical, ElectiveCourseOffering
 )
 from .utils.web_scrapper import fetch_acoe_updates
@@ -370,20 +370,40 @@ def add_student(request):
                 user.set_unusable_password()
                 user.save()
                 
+                # Determine current_sem and admission_year based on entry_type
+                entry_type = form.cleaned_data['entry_type']
+                current_sem = 1 if entry_type == 'REGULAR' else 3
+                from datetime import datetime
+                admission_year = datetime.now().year
+                
                 # Update student profile (auto-created by signal)
                 student = user.student_profile
                 student.register_no = form.cleaned_data['register_no']
                 student.batch_label = form.cleaned_data['batch_label']
                 student.branch = form.cleaned_data['branch']
                 student.program_type = form.cleaned_data['program_type']
-                student.admission_year = form.cleaned_data['admission_year']
-                student.current_sem = form.cleaned_data.get('current_sem', 1)
+                student.entry_type = entry_type
+                student.admission_year = admission_year
+                student.current_sem = current_sem
                 
-                # Auto-assign regulation based on admission year
-                admission_year = form.cleaned_data['admission_year']
-                regulation = Regulation.objects.filter(
-                    year__lte=admission_year
-                ).order_by('-year').first()
+                # Auto-assign regulation using ProgramRegulation mapping
+                # REGULAR: joins as 1st year → follows regulation of their admission year
+                # LATERAL: joins as 2nd year → follows regulation of batch that started 1 year earlier
+                regulation_lookup_year = admission_year if entry_type == 'REGULAR' else (admission_year - 1)
+                
+                # Use ProgramRegulation to find the correct regulation
+                regulation = ProgramRegulation.get_regulation_for_student(
+                    program_code=student.branch,
+                    program_level=student.program_type,
+                    admission_year=regulation_lookup_year
+                )
+                
+                # Fallback to old method if no ProgramRegulation mapping exists
+                if not regulation:
+                    regulation = Regulation.objects.filter(
+                        year__lte=regulation_lookup_year
+                    ).order_by('-year').first()
+                
                 if regulation:
                     student.regulation = regulation
                 
@@ -417,38 +437,90 @@ def manage_student(request):
     if not check_hod_permission(request.user):
         return redirect('/')
     
-    students = Student_Profile.objects.select_related('user', 'advisor', 'regulation').all()
+    students = Student_Profile.objects.select_related('user', 'advisor', 'regulation').filter(status='ACTIVE')
     
     # Apply filters
     branch = request.GET.get('branch')
     batch = request.GET.get('batch')
-    semester = request.GET.get('semester')
+    year_of_study = request.GET.get('year')
+    program_level = request.GET.get('level')  # UG or PG
     
+    if program_level:
+        students = students.filter(program_type=program_level)
     if branch:
         students = students.filter(branch=branch)
+    if year_of_study:
+        # Year 1 = Sem 1,2 | Year 2 = Sem 3,4 | Year 3 = Sem 5,6 | Year 4 = Sem 7,8
+        year_int = int(year_of_study)
+        sem_start = (year_int - 1) * 2 + 1
+        sem_end = year_int * 2
+        students = students.filter(current_sem__gte=sem_start, current_sem__lte=sem_end)
     if batch:
         students = students.filter(batch_label=batch)
-    if semester:
-        students = students.filter(current_sem=semester)
     
-    # Get programs from database for branch filtering
-    all_programs = Program.objects.all().order_by('level', 'code')
+    # Order by register number
+    students = students.order_by('register_no')
     
-    # Get batch choices from database
+    # Get unique program codes for branch filtering (avoid duplicates like multiple CSE entries)
+    # Filter by level if selected
+    programs_qs = Program.objects.all()
+    if program_level:
+        programs_qs = programs_qs.filter(level=program_level)
+    
+    branch_choices = list(programs_qs.values('code', 'name', 'level').distinct().order_by('level', 'code'))
+    # Deduplicate by code - keep first occurrence
+    seen_codes = set()
+    unique_branches = []
+    for prog in branch_choices:
+        if prog['code'] not in seen_codes:
+            seen_codes.add(prog['code'])
+            unique_branches.append(prog)
+    
+    # Get batch choices from database - filter by level if selected
     current_year = AcademicYear.get_current()
     if current_year:
-        batch_choices = list(ProgramBatch.objects.filter(
+        batch_qs = ProgramBatch.objects.filter(
             academic_year=current_year,
             is_active=True
-        ).values_list('batch_name', 'batch_display').distinct().order_by('batch_name'))
+        )
+        if program_level:
+            batch_qs = batch_qs.filter(program__level=program_level)
+        batch_choices = list(batch_qs.values_list('batch_name', flat=True).distinct().order_by('batch_name'))
     else:
         batch_choices = []
+    
+    # Get counts by year of study for quick stats
+    year_counts = {}
+    base_qs = Student_Profile.objects.filter(status='ACTIVE')
+    if program_level:
+        base_qs = base_qs.filter(program_type=program_level)
+    if branch:
+        base_qs = base_qs.filter(branch=branch)
+    if batch:
+        base_qs = base_qs.filter(batch_label=batch)
+    
+    for yr in range(1, 5):
+        sem_start = (yr - 1) * 2 + 1
+        sem_end = yr * 2
+        year_counts[yr] = base_qs.filter(
+            current_sem__gte=sem_start,
+            current_sem__lte=sem_end
+        ).count()
+    
+    total_all_years = sum(year_counts.values())
     
     context = {
         'students': students,
         'page_title': 'Manage Students',
-        'all_programs': all_programs,
+        'branch_choices': unique_branches,
         'batch_choices': batch_choices,
+        'year_counts': year_counts,
+        'total_all_years': total_all_years,
+        'selected_branch': branch or '',
+        'selected_batch': batch or '',
+        'selected_year': year_of_study or '',
+        'selected_level': program_level or '',
+        'total_students': students.count(),
     }
     return render(request, "hod_template/manage_student.html", context)
 
@@ -617,29 +689,6 @@ def delete_course(request, course_code):
 # =============================================================================
 # COURSE ASSIGNMENT MANAGEMENT
 # =============================================================================
-
-@login_required
-def add_course_assignment(request):
-    """Add course assignment (assign faculty to course)"""
-    if not check_hod_permission(request.user):
-        return redirect('/')
-    
-    form = CourseAssignmentForm(request.POST or None)
-    context = {'form': form, 'page_title': 'Assign Course to Faculty'}
-    
-    if request.method == 'POST':
-        if form.is_valid():
-            try:
-                form.save()
-                messages.success(request, "Course assignment created successfully!")
-                return redirect(reverse('manage_course_assignment'))
-            except Exception as e:
-                messages.error(request, f"Could not create assignment: {str(e)}")
-        else:
-            messages.error(request, "Please fill all required fields correctly")
-    
-    return render(request, 'hod_template/add_course_allocation_template.html', context)
-
 
 @login_required
 def manage_course_assignment(request):
@@ -1107,7 +1156,7 @@ def manage_regulation_courses(request, regulation_id):
         'available_courses': available_courses,
         'all_programs': all_programs,
         'program_levels': program_levels,
-        'semesters': range(1, 9),
+        'semesters': range(1, 13),  # Support up to 12 semesters (max allowed by Program model)
     }
     return render(request, 'hod_template/manage_regulation_courses.html', context)
 
@@ -1241,7 +1290,8 @@ def api_get_programs_by_level(request):
         'full_name': p.full_name,
         'level': p.level,
         'degree': p.degree,
-        'specialization': p.specialization or ''
+        'specialization': p.specialization or '',
+        'total_semesters': p.total_semesters
     } for p in programs]
     
     return JsonResponse({'programs': data})
@@ -1302,6 +1352,7 @@ def api_add_regulation_course(request, regulation_id):
     is_elective = request.POST.get('is_elective') == '1'
     elective_vertical_id = request.POST.get('elective_vertical', '').strip() or None
     auto_placeholder = request.POST.get('auto_placeholder') == '1'  # New flag for auto-assign
+    credits = int(request.POST.get('credits', 3))  # Credits for placeholder courses
     
     try:
         category = CourseCategory.objects.get(id=category_id) if category_id else None
@@ -1324,8 +1375,8 @@ def api_add_regulation_course(request, regulation_id):
             
             next_slot = existing_count + 1
             
-            # Get or create the placeholder course for this slot
-            course, created = Course.get_or_create_placeholder(category.code, next_slot)
+            # Get or create the placeholder course for this slot with user-specified credits
+            course, created = Course.get_or_create_placeholder(category.code, next_slot, credits=credits)
             if not course:
                 return JsonResponse({
                     'success': False, 
@@ -1488,22 +1539,49 @@ def api_get_elective_offerings(request):
         return JsonResponse({'error': 'Permission denied'}, status=403)
     
     plan_id = request.GET.get('plan_id')
+    semester_id = request.GET.get('semester_id')
     
     if not plan_id:
         return JsonResponse({'error': 'plan_id required'}, status=400)
     
-    offerings = ElectiveCourseOffering.objects.filter(
-        regulation_course_plan_id=plan_id
-    ).select_related('actual_course', 'elective_vertical')
+    filters = {'regulation_course_plan_id': plan_id}
+    if semester_id:
+        filters['semester_id'] = semester_id
     
-    data = [{
-        'id': o.id,
-        'course_code': o.actual_course.course_code,
-        'course_title': o.actual_course.title,
-        'batch_count': o.batch_count,
-        'capacity_per_batch': o.capacity_per_batch,
-        'vertical': o.elective_vertical.name if o.elective_vertical else None,
-    } for o in offerings]
+    offerings = ElectiveCourseOffering.objects.filter(
+        **filters
+    ).select_related('actual_course', 'elective_vertical').prefetch_related(
+        'faculty_assignments__faculty__user',
+        'faculty_assignments__lab_assistant__user'
+    )
+    
+    data = []
+    for o in offerings:
+        # Get existing faculty assignments for this offering
+        assignments = {}
+        for fa in o.faculty_assignments.all():
+            assignments[fa.batch_number] = {
+                'faculty_id': fa.faculty_id,
+                'faculty_name': fa.faculty.user.full_name if fa.faculty else None,
+                'lab_assistant_id': fa.lab_assistant_id,
+                'lab_assistant_name': fa.lab_assistant.user.full_name if fa.lab_assistant else None,
+            }
+        
+        # Check if course needs lab assistant
+        course = o.actual_course
+        needs_lab = course.course_type in ['L', 'LIT'] or course.practical_hours > 0
+        
+        data.append({
+            'id': o.id,
+            'course_code': course.course_code,
+            'course_title': course.title,
+            'course_type': course.course_type,
+            'batch_count': o.batch_count,
+            'capacity_per_batch': o.capacity_per_batch,
+            'vertical': o.elective_vertical.name if o.elective_vertical else None,
+            'needs_lab_assistant': needs_lab,
+            'assignments': assignments,
+        })
     
     return JsonResponse({'offerings': data})
 
@@ -1579,6 +1657,81 @@ def api_remove_elective_offering(request):
         return JsonResponse({'success': True})
     except ElectiveCourseOffering.DoesNotExist:
         return JsonResponse({'success': False, 'error': 'Offering not found'})
+    except Exception as e:
+        return JsonResponse({'success': False, 'error': str(e)})
+
+
+@login_required
+@csrf_exempt
+def api_save_elective_offering_assignment(request):
+    """
+    API endpoint to save faculty assignments for an elective course offering.
+    Handles multiple batch assignments at once.
+    """
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    import json
+    
+    try:
+        # Parse JSON body
+        if request.content_type == 'application/json':
+            data = json.loads(request.body)
+        else:
+            data = request.POST
+        
+        offering_id = data.get('offering_id')
+        assignments = data.get('assignments', [])  # [{batch_number, faculty_id, lab_assistant_id}, ...]
+        
+        if not offering_id:
+            return JsonResponse({'success': False, 'error': 'offering_id required'})
+        
+        offering = ElectiveCourseOffering.objects.get(id=offering_id)
+        
+        # Import the model here to avoid circular imports
+        from main_app.models import ElectiveOfferingFacultyAssignment
+        
+        # Process each assignment
+        saved_count = 0
+        for a in assignments:
+            batch_number = int(a.get('batch_number', 0))
+            faculty_id = a.get('faculty_id')
+            lab_assistant_id = a.get('lab_assistant_id')
+            
+            if batch_number < 1 or batch_number > offering.batch_count:
+                continue
+            
+            if faculty_id:
+                # Create or update assignment
+                fa, created = ElectiveOfferingFacultyAssignment.objects.update_or_create(
+                    offering=offering,
+                    batch_number=batch_number,
+                    defaults={
+                        'faculty_id': faculty_id,
+                        'lab_assistant_id': lab_assistant_id if lab_assistant_id else None,
+                        'is_active': True
+                    }
+                )
+                saved_count += 1
+            else:
+                # Remove assignment if no faculty specified
+                ElectiveOfferingFacultyAssignment.objects.filter(
+                    offering=offering,
+                    batch_number=batch_number
+                ).delete()
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'Saved {saved_count} assignment(s)'
+        })
+    
+    except ElectiveCourseOffering.DoesNotExist:
+        return JsonResponse({'success': False, 'error': 'Offering not found'})
+    except Faculty_Profile.DoesNotExist:
+        return JsonResponse({'success': False, 'error': 'Faculty not found'})
     except Exception as e:
         return JsonResponse({'success': False, 'error': str(e)})
 
@@ -1733,17 +1886,30 @@ def semester_course_assignment(request):
     
     from django.utils import timezone
     
-    # Get active/upcoming semesters
-    current_academic_year = AcademicYear.get_current()
-    semesters = Semester.objects.filter(
-        academic_year=current_academic_year
-    ).order_by('semester_number') if current_academic_year else Semester.objects.none()
-    
-    # Get filter parameters
+    # Get filter parameters first to determine program type
     selected_semester = request.GET.get('semester_id')
     selected_branch = request.GET.get('branch', '')
     selected_batch = request.GET.get('batch')
     selected_program = request.GET.get('program_type', 'UG')
+    
+    # Get current academic year
+    current_academic_year = AcademicYear.get_current()
+    
+    # Get semesters filtered by:
+    # 1. Only CURRENT or UPCOMING (not COMPLETED)
+    # 2. If PG selected, only sem 1-4; if UG, sem 1-8
+    today = timezone.now().date()
+    max_semester = 4 if selected_program == 'PG' else 8
+    
+    if current_academic_year:
+        # Get semesters that are current or upcoming (end_date >= today)
+        semesters = Semester.objects.filter(
+            academic_year=current_academic_year,
+            end_date__gte=today,  # Not completed
+            semester_number__lte=max_semester  # Respect program type
+        ).order_by('semester_number')
+    else:
+        semesters = Semester.objects.none()
     
     # Get programs from database for dynamic branch selection
     all_programs = Program.objects.all().order_by('level', 'code')
@@ -1756,14 +1922,8 @@ def semester_course_assignment(request):
     if not selected_branch and filtered_programs.exists():
         selected_branch = filtered_programs.first().code
     
-    # Get batch choices from database
-    if current_academic_year:
-        batch_choices = list(ProgramBatch.objects.filter(
-            academic_year=current_academic_year,
-            is_active=True
-        ).values_list('batch_name', 'batch_display').distinct().order_by('batch_name'))
-    else:
-        batch_choices = []
+    # Get batch choices - will be populated after semester is selected
+    batch_choices = []
     
     # Get all regulations for manual selection
     all_regulations = Regulation.objects.all().order_by('-year', 'name')
@@ -1792,6 +1952,22 @@ def semester_course_assignment(request):
         semester_obj = get_object_or_404(Semester, id=selected_semester)
         context['semester_obj'] = semester_obj
         
+        # Calculate year of study from semester number
+        import math
+        year_of_study = math.ceil(semester_obj.semester_number / 2)
+        
+        # Get batch choices for this specific program/year from ProgramBatch config
+        if current_academic_year:
+            program_batches = ProgramBatch.objects.filter(
+                academic_year=current_academic_year,
+                program__code=selected_branch,
+                year_of_study=year_of_study,
+                is_active=True
+            ).order_by('batch_name')
+            
+            batch_choices = [(b.batch_name, b.batch_display) for b in program_batches]
+            context['batch_choices'] = batch_choices
+        
         # Determine which regulation applies to students in this semester
         # Find students in this semester number with this branch
         students_in_sem = Student_Profile.objects.filter(
@@ -1816,16 +1992,39 @@ def semester_course_assignment(request):
             if reg_counts and reg_counts[0]['regulation']:
                 regulation = Regulation.objects.get(id=reg_counts[0]['regulation'])
         
-        # If no students or no regulation detected, allow manual selection
-        if not regulation and selected_regulation_id:
+        # If no students or no regulation detected, auto-detect based on semester
+        if not regulation:
+            # Calculate admission year from semester and current academic year
+            # year_of_study = ceil(semester / 2): sem 1-2 = year 1, sem 3-4 = year 2, etc.
+            import math
+            year_of_study = math.ceil(semester_obj.semester_number / 2)
+            
+            # Get start year from current academic year (e.g., "2024-25" -> 2024)
+            try:
+                start_year = int(current_academic_year.year.split('-')[0])
+                admission_year = start_year - (year_of_study - 1)
+                
+                # Find the appropriate regulation: latest regulation effective at admission time
+                # Logic: regulation.year <= admission_year, ordered by year descending
+                auto_regulation = Regulation.objects.filter(year__lte=admission_year).order_by('-year').first()
+                if auto_regulation:
+                    regulation = auto_regulation
+                    context['regulation_auto_detected'] = True
+                    context['detected_admission_year'] = admission_year
+            except (ValueError, IndexError):
+                pass
+        
+        # Allow manual override if explicitly selected
+        if selected_regulation_id:
             try:
                 regulation = Regulation.objects.get(id=selected_regulation_id)
+                context['regulation_manual_override'] = True
             except Regulation.DoesNotExist:
                 pass
         
         context['regulation'] = regulation
         context['student_count'] = student_count
-        context['needs_regulation_selection'] = (student_count == 0 and not regulation)
+        context['needs_regulation_selection'] = (not regulation)
         
         # Get course plan from regulation
         if regulation:
@@ -1901,6 +2100,7 @@ def create_course_assignments(request):
         course_codes = request.POST.getlist('course_code[]')
         faculty_ids = request.POST.getlist('faculty_id[]')
         batch_labels = request.POST.getlist('batch_label[]')
+        lab_assistant_ids = request.POST.getlist('lab_assistant_id[]')
         
         created_count = 0
         errors = []
@@ -1911,6 +2111,7 @@ def create_course_assignments(request):
                 
             faculty_id = faculty_ids[i] if i < len(faculty_ids) else None
             batch_label = batch_labels[i] if i < len(batch_labels) else None
+            lab_assistant_id = lab_assistant_ids[i] if i < len(lab_assistant_ids) else None
             
             if not faculty_id or not batch_label:
                 continue
@@ -1918,17 +2119,29 @@ def create_course_assignments(request):
             try:
                 course = Course.objects.get(course_code=course_code)
                 faculty = Faculty_Profile.objects.get(id=faculty_id)
+                lab_assistant = None
+                if lab_assistant_id:
+                    lab_assistant = Faculty_Profile.objects.get(id=lab_assistant_id)
                 
                 # Check if assignment already exists
-                if not Course_Assignment.objects.filter(
+                existing = Course_Assignment.objects.filter(
                     course=course,
                     batch_label=batch_label,
                     academic_year=academic_year,
                     semester=semester_obj
-                ).exists():
+                ).first()
+                
+                if existing:
+                    # Update existing assignment
+                    existing.faculty = faculty
+                    existing.lab_assistant = lab_assistant
+                    existing.save()
+                    created_count += 1
+                else:
                     Course_Assignment.objects.create(
                         course=course,
                         faculty=faculty,
+                        lab_assistant=lab_assistant,
                         batch_label=batch_label,
                         academic_year=academic_year,
                         semester=semester_obj,
@@ -1967,8 +2180,8 @@ def manage_program_batches(request, year_id=None):
     else:
         selected_year = AcademicYear.get_current() or academic_years.first()
     
-    # Get all programs
-    programs = Program.objects.all().order_by('level', 'code')
+    # Get all programs with regulation
+    programs = Program.objects.all().select_related('regulation').order_by('level', 'code')
     
     # Get Year 1 batches for the selected year, grouped by program
     year1_batches = []
@@ -1976,20 +2189,20 @@ def manage_program_batches(request, year_id=None):
         batches = ProgramBatch.objects.filter(
             academic_year=selected_year,
             year_of_study=1  # Only Year 1 batches
-        ).select_related('program').order_by('program__level', 'program__code', 'batch_name')
+        ).select_related('program', 'program__regulation').order_by('program__level', 'program__code', 'batch_name')
         
-        # Group batches by program
+        # Group batches by program (using ID to differentiate same code under different regulations)
         batches_by_program = {}
         for batch in batches:
-            if batch.program.code not in batches_by_program:
+            if batch.program.id not in batches_by_program:
                 # Check if students exist for this program's Year 1
                 has_students = ProgramBatch.has_students(selected_year, batch.program, 1)
-                batches_by_program[batch.program.code] = {
+                batches_by_program[batch.program.id] = {
                     'program': batch.program,
                     'batches': [],
                     'has_students': has_students,
                 }
-            batches_by_program[batch.program.code]['batches'].append(batch)
+            batches_by_program[batch.program.id]['batches'].append(batch)
         
         year1_batches = list(batches_by_program.values())
     
@@ -2242,7 +2455,7 @@ def manage_programs(request):
     if not check_hod_permission(request.user):
         return redirect('/')
     
-    programs = Program.objects.all().prefetch_related('regulations')
+    programs = Program.objects.all().select_related('regulation')
     context = {'programs': programs, 'page_title': 'Manage Programs'}
     return render(request, "hod_template/manage_programs.html", context)
 
@@ -2965,9 +3178,7 @@ edit_staff = edit_faculty
 delete_staff = delete_faculty
 add_session = add_academic_year
 manage_session = manage_academic_year
-add_course_allocation = add_course_assignment
-manage_course_allocation = manage_course_assignment
-delete_course_allocation = delete_course_assignment
+
 student_feedback_message = view_feedbacks
 staff_feedback_message = view_feedbacks
 view_staff_leave = view_leave_requests
@@ -3005,7 +3216,7 @@ def manage_timetables(request):
     if academic_year_filter:
         timetables = timetables.filter(academic_year_id=academic_year_filter)
     
-    academic_years = AcademicYear.objects.all().order_by('-start_date')
+    academic_years = AcademicYear.objects.all().order_by('-year')
     
     # Get batch choices from database
     current_year = AcademicYear.get_current()
@@ -3369,6 +3580,7 @@ def bulk_upload_students(request):
     
     # Get current academic year and configured batches
     current_year = AcademicYear.get_current()
+    
     configured_batches = {}  # {program_code: [batch_names]}
     programs_without_batches = []
     
@@ -3431,8 +3643,7 @@ def bulk_upload_students(request):
                     batch = row.get('batch', '').strip().upper()
                     branch = row.get('branch', '').strip().upper()
                     program = row.get('program', 'UG').strip().upper()
-                    admission_year = row.get('admission_year', '').strip()
-                    current_sem = row.get('current_sem', '1').strip()
+                    entry_type = row.get('entry_type', 'REGULAR').strip().upper()
                     
                     # Optional fields
                     phone = row.get('phone', '').strip()
@@ -3440,8 +3651,98 @@ def bulk_upload_students(request):
                     parent_phone = row.get('parent_phone', '').strip()
                     address = row.get('address', '').strip()
                     
+                    # Admission year - optional, defaults based on academic year context
+                    from datetime import datetime
+                    admission_year_str = row.get('admission_year', '').strip()
+                    if admission_year_str:
+                        try:
+                            admission_year = int(admission_year_str)
+                            # Validate reasonable year range (2015 to current+1)
+                            current_cal_year = datetime.now().year
+                            if admission_year < 2015 or admission_year > current_cal_year + 1:
+                                errors.append(f"Row {row_num}: admission_year must be between 2015 and {current_cal_year + 1}")
+                                error_count += 1
+                                continue
+                        except ValueError:
+                            errors.append(f"Row {row_num}: admission_year must be a valid year (got '{admission_year_str}')")
+                            error_count += 1
+                            continue
+                    else:
+                        # Default admission_year based on academic year context
+                        # Academic year starts in Aug, so:
+                        # - If Jan-Jul (before new batch joins): current 1st years are from previous year
+                        # - If Aug-Dec (after new batch joins): current 1st years are from this year
+                        today = datetime.now()
+                        if today.month >= 8:  # Aug-Dec: new batch has joined
+                            admission_year = today.year
+                        else:  # Jan-Jul: 1st years are from previous year's Aug
+                            admission_year = today.year - 1
+                    
+                    # Current semester - optional, if provided use it, else calculate from database
+                    current_sem_str = row.get('current_sem', '').strip()
+                    if current_sem_str:
+                        try:
+                            current_sem = int(current_sem_str)
+                            # Validate semester range
+                            if current_sem < 1 or current_sem > 8:
+                                errors.append(f"Row {row_num}: current_sem must be between 1 and 8 (got {current_sem})")
+                                error_count += 1
+                                continue
+                            # Validate lateral entry starts from sem 3
+                            if entry_type == 'LATERAL' and current_sem < 3:
+                                errors.append(f"Row {row_num}: LATERAL entry students must be in semester 3 or higher (got {current_sem})")
+                                error_count += 1
+                                continue
+                        except ValueError:
+                            errors.append(f"Row {row_num}: current_sem must be a valid number (got '{current_sem_str}')")
+                            error_count += 1
+                            continue
+                    else:
+                        # Auto-calculate semester from database config
+                        # Check if there's a current semester configured in database
+                        db_current_sem = Semester.get_current()
+                        
+                        if db_current_sem:
+                            # Use database semester config to determine odd/even
+                            is_odd_semester = db_current_sem.semester_number % 2 == 1
+                            years_passed = datetime.now().year - admission_year
+                            
+                            # Adjust for academic year (odd sem starts in Aug of admission year)
+                            # If in odd sem: student in year N is in sem (N*2 - 1)
+                            # If in even sem: student in year N is in sem (N*2)
+                            if is_odd_semester:
+                                semester_offset = years_passed * 2 + 1
+                            else:
+                                # Even semester: we're in the next calendar year
+                                semester_offset = years_passed * 2
+                        else:
+                            # Fallback: use month-based calculation if no semester configured
+                            today = datetime.now()
+                            current_month = today.month
+                            years_passed = today.year - admission_year
+                            
+                            if current_month >= 8:  # Aug onwards = Odd semester
+                                semester_offset = years_passed * 2 + 1
+                            elif current_month <= 5:  # Jan-May = Even semester
+                                semester_offset = years_passed * 2
+                            else:  # June-July = Summer break
+                                semester_offset = years_passed * 2
+                        
+                        # For lateral entry, add 2 (they skip sem 1 & 2)
+                        if entry_type == 'LATERAL':
+                            semester_offset += 2
+                        
+                        # Clamp to valid range (1-8 for B.E.)
+                        current_sem = max(1, min(semester_offset, 8))
+                    
+                    # Validate entry_type
+                    if entry_type not in ['REGULAR', 'LATERAL']:
+                        errors.append(f"Row {row_num}: entry_type must be REGULAR or LATERAL (got '{entry_type}')")
+                        error_count += 1
+                        continue
+                    
                     # Validation
-                    if not all([register_no, full_name, email, gender, batch, branch, admission_year]):
+                    if not all([register_no, full_name, email, gender, batch, branch]):
                         errors.append(f"Row {row_num}: Missing required fields")
                         error_count += 1
                         continue
@@ -3457,22 +3758,44 @@ def bulk_upload_students(request):
                         continue
                     
                     # Validate branch exists in database
-                    valid_branches = list(Program.objects.values_list('code', flat=True))
-                    if branch not in valid_branches:
-                        errors.append(f"Row {row_num}: Branch '{branch}' not found. Valid options: {', '.join(valid_branches)}")
+                    # Note: We validate branch exists as a Program, the regulation mapping is handled separately
+                    all_branches = list(Program.objects.values_list('code', flat=True).distinct())
+                    if branch not in all_branches:
+                        errors.append(f"Row {row_num}: Branch '{branch}' not found. Valid options: {', '.join(all_branches)}")
                         error_count += 1
                         continue
                     
-                    # Check if batches are configured for this branch
-                    if branch not in configured_batches:
-                        errors.append(f"Row {row_num}: No batches configured for {branch}. Please configure batches in 'Manage Batches' first.")
+                    # Calculate year of study from current_sem for batch validation
+                    year_of_study = (current_sem + 1) // 2
+                    
+                    # Get batches for this branch and year of study
+                    branch_batches_for_year = ProgramBatch.objects.filter(
+                        academic_year=current_year,
+                        program__code=branch,
+                        year_of_study=year_of_study,
+                        is_active=True
+                    ).values_list('batch_name', flat=True)
+                    valid_batches = list(branch_batches_for_year)
+                    
+                    # Check if batches are configured for this branch and year
+                    if not valid_batches:
+                        # Fallback: check if ANY batches exist for this branch
+                        any_batches = ProgramBatch.objects.filter(
+                            academic_year=current_year,
+                            program__code=branch,
+                            is_active=True
+                        ).values_list('batch_name', 'year_of_study')
+                        if any_batches:
+                            available = [f"{b[0]} (Year {b[1]})" for b in any_batches]
+                            errors.append(f"Row {row_num}: No batches configured for {branch} Year {year_of_study}. Available: {', '.join(available)}")
+                        else:
+                            errors.append(f"Row {row_num}: No batches configured for {branch}. Please configure batches in 'Manage Batches' first.")
                         error_count += 1
                         continue
                     
-                    # Validate batch against configured batches for this branch
-                    valid_batches = configured_batches[branch]
+                    # Validate batch against configured batches for this branch and year
                     if batch not in valid_batches:
-                        errors.append(f"Row {row_num}: Batch '{batch}' not valid for {branch}. Configured batches: {', '.join(valid_batches)}")
+                        errors.append(f"Row {row_num}: Batch '{batch}' not valid for {branch} Year {year_of_study}. Configured batches: {', '.join(valid_batches)}")
                         error_count += 1
                         continue
                     
@@ -3512,16 +3835,30 @@ def bulk_upload_students(request):
                         student.batch_label = batch
                         student.branch = branch
                         student.program_type = program_type
-                        student.admission_year = int(admission_year)
-                        student.current_sem = int(current_sem) if current_sem else 1
+                        student.entry_type = entry_type
+                        student.admission_year = admission_year
+                        student.current_sem = current_sem
                         student.parent_name = parent_name or None
                         student.parent_phone = parent_phone or None
                         
-                        # Auto-assign regulation based on admission year
-                        # Find the regulation that applies to this admission year (latest regulation year <= admission year)
-                        regulation = Regulation.objects.filter(
-                            year__lte=int(admission_year)
-                        ).order_by('-year').first()
+                        # Auto-assign regulation using ProgramRegulation mapping
+                        # REGULAR: joins as 1st year → follows regulation of their admission year
+                        # LATERAL: joins as 2nd year → follows regulation of batch that started 1 year earlier
+                        regulation_lookup_year = admission_year if entry_type == 'REGULAR' else (admission_year - 1)
+                        
+                        # Use ProgramRegulation to find the correct regulation
+                        regulation = ProgramRegulation.get_regulation_for_student(
+                            program_code=branch,
+                            program_level=program_type,
+                            admission_year=regulation_lookup_year
+                        )
+                        
+                        # Fallback to old method if no ProgramRegulation mapping exists
+                        if not regulation:
+                            regulation = Regulation.objects.filter(
+                                year__lte=regulation_lookup_year
+                            ).order_by('-year').first()
+                        
                         if regulation:
                             student.regulation = regulation
                         
@@ -3571,11 +3908,15 @@ def bulk_upload_students(request):
             messages.error(request, f"Error processing CSV file: {str(e)}")
             return redirect('bulk_upload_students')
     
+    # Get available regulations for display
+    all_regulations = Regulation.objects.all().order_by('-year')
+    
     context = {
         'page_title': 'Bulk Upload Students',
         'current_year': current_year,
         'configured_batches': configured_batches,
         'programs_without_batches': programs_without_batches,
+        'all_regulations': all_regulations,
     }
     return render(request, 'hod_template/bulk_upload_students.html', context)
 
@@ -3589,21 +3930,50 @@ def download_student_template(request):
     response = HttpResponse(content_type='text/csv')
     response['Content-Disposition'] = 'attachment; filename="student_upload_template.csv"'
     
+    # Get configured programs and batches for sample data
+    programs = list(Program.objects.values_list('code', flat=True)[:2])
+    current_year = AcademicYear.get_current()
+    batch_examples = ['A', 'B']  # Default examples
+    if current_year:
+        batches = ProgramBatch.objects.filter(
+            academic_year=current_year,
+            year_of_study=1,
+            is_active=True
+        ).values_list('batch_name', flat=True).distinct()[:2]
+        if batches:
+            batch_examples = list(batches)
+    
+    # Use actual program codes or placeholders
+    program1 = programs[0] if len(programs) > 0 else 'CSE'
+    program2 = programs[1] if len(programs) > 1 else 'IT'
+    batch1 = batch_examples[0] if batch_examples else 'A'
+    batch2 = batch_examples[1] if len(batch_examples) > 1 else 'B'
+    
     writer = csv.writer(response)
     # Header row
     writer.writerow([
         'register_no', 'full_name', 'email', 'gender', 'batch', 'branch', 
-        'program', 'admission_year', 'current_sem', 'phone', 'parent_name', 
+        'program', 'entry_type', 'admission_year', 'current_sem', 'phone', 'parent_name', 
         'parent_phone', 'address'
     ])
-    # Sample data rows
+    # Sample data rows - showing different scenarios
+    from datetime import datetime
+    curr_year = datetime.now().year
     writer.writerow([
-        '2023105001', 'John Doe', 'john.doe@student.edu', 'M', 'N', 'CSE',
-        'B.E', '2023', '1', '9876543210', 'Mr. Doe', '9876543211', 'Chennai'
+        '2023105001', 'Senior (Explicit Sem)', 'senior@student.edu', 'M', batch1, program1,
+        'B.E', 'REGULAR', 2023, 6, '9876543210', 'Mr. Doe', '9876543211', 'Chennai'
     ])
     writer.writerow([
-        '2023105002', 'Jane Smith', 'jane.smith@student.edu', 'F', 'P', 'AIML',
-        'B.E', '2023', '1', '9876543212', 'Mrs. Smith', '9876543213', 'Coimbatore'
+        '2024105002', 'Junior (Auto Sem)', 'junior@student.edu', 'F', batch2, program2,
+        'B.E', 'REGULAR', 2024, '', '9876543212', 'Mrs. Smith', '9876543213', 'Coimbatore'  # Empty = auto-calculate
+    ])
+    writer.writerow([
+        '2026105003', 'New Student', 'new@student.edu', 'M', batch1, program1,
+        'B.E', 'REGULAR', '', '', '9876543214', '', '', ''  # Both empty = current year, auto-calc sem
+    ])
+    writer.writerow([
+        '2025105004', 'Lateral Entry', 'lateral@student.edu', 'F', batch2, program2,
+        'B.E', 'LATERAL', 2025, 4, '', '', '', ''  # Lateral must be sem 3+
     ])
     
     return response
@@ -3816,7 +4186,7 @@ def manual_promote_students(request):
         students = Student_Profile.objects.filter(id__in=student_ids)
         
         # Get current academic year
-        academic_year = AcademicYear.objects.filter(is_active=True).first()
+        academic_year = AcademicYear.objects.order_by('-year').first()
         
         results = promote_students_manually(
             students=students,

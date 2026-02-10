@@ -577,7 +577,7 @@ def student_view_timetable(request):
     try:
         current_academic_year = AcademicYear.get_current()
         if not current_academic_year:
-            current_academic_year = AcademicYear.objects.order_by('-start_date').first()
+            current_academic_year = AcademicYear.objects.order_by('-year').first()
     except:
         current_academic_year = None
     

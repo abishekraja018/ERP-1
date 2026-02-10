@@ -77,12 +77,14 @@
                                 <p>Manage Students</p>
                             </a>
                         </li>
+                        {% comment %}
                         <li class="nav-item">
                             <a href="{% url 'bulk_promote_semester' %}" class="nav-link {% if 'promotions/bulk' in request.path %}active{% endif %}">
                                 <i class="far fa-circle nav-icon"></i>
                                 <p>Bulk Promotion</p>
                             </a>
                         </li>
+                        {% endcomment %}
                     </ul>
                 </li>
 
@@ -119,12 +121,6 @@
                             <a href="{% url 'semester_course_assignment' %}" class="nav-link {% if 'semester/course-assignment' in request.path %}active{% endif %}">
                                 <i class="far fa-circle nav-icon text-warning"></i>
                                 <p>Semester Assignment</p>
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a href="{% url 'add_course_assignment' %}" class="nav-link {% if 'course-assignment/add' in request.path %}active{% endif %}">
-                                <i class="far fa-circle nav-icon"></i>
-                                <p>Add Assignment</p>
                             </a>
                         </li>
                         <li class="nav-item">

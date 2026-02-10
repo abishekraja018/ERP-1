@@ -308,6 +308,9 @@ class Program(models.Model):
     - M.E. Computer Science & Engg. Spl. in Operations Research (PG)
     - M.E. Computer Science & Engg. Spl. in Big Data Analytics (PG)
     - M.E. Software Engineering (PG)
+    
+    Note: Program code is unique per regulation, allowing the same program code
+    to exist under different regulations with potentially different curriculum structures.
     """
     
     PROGRAM_LEVEL_CHOICES = [
@@ -323,7 +326,7 @@ class Program(models.Model):
         ('MS', 'M.S.'),
     ]
     
-    code = models.CharField(max_length=20, unique=True, help_text="e.g., CSE, CSE-OR, CSE-BDA, SE")
+    code = models.CharField(max_length=20, help_text="e.g., CSE, CSE-OR, CSE-BDA, SE")
     name = models.CharField(max_length=200, help_text="Full program name")
     degree = models.CharField(max_length=10, choices=DEGREE_CHOICES, default='BE')
     level = models.CharField(max_length=5, choices=PROGRAM_LEVEL_CHOICES, default='UG')
@@ -336,14 +339,20 @@ class Program(models.Model):
                                                help_text="Default number of batches for 1st year intake")
     default_batch_labels = models.CharField(max_length=50, default='A,B,C', blank=True,
                                              help_text="Default batch names separated by comma (e.g., A,B,C or N,P,Q)")
-    regulations = models.ManyToManyField(Regulation, related_name='programs', blank=True,
-                                          help_text="Regulations under which this program is offered")
+    # DEPRECATED: Use ProgramRegulation model instead for program-regulation mapping
+    # This field is kept for backwards compatibility but should not be used
+    regulation = models.ForeignKey(Regulation, on_delete=models.SET_NULL, related_name='programs_deprecated',
+                                    null=True, blank=True,
+                                    help_text="DEPRECATED - Use ProgramRegulation model instead")
     created_at = models.DateTimeField(auto_now_add=True)
     
     class Meta:
         ordering = ['level', 'name']
         verbose_name = 'Academic Program'
         verbose_name_plural = 'Academic Programs'
+        constraints = [
+            models.UniqueConstraint(fields=['code', 'regulation'], name='unique_program_code_per_regulation')
+        ]
     
     def __str__(self):
         if self.specialization:
@@ -366,6 +375,104 @@ class Program(models.Model):
     def student_count(self):
         """Get count of students enrolled in this program"""
         return Student_Profile.objects.filter(branch=self.code).count()
+
+
+class ProgramRegulation(models.Model):
+    """
+    Links Programs to their applicable Regulations based on admission year ranges.
+    
+    This allows:
+    - Different programs to follow different regulations
+    - Same program to transition between regulations over time
+    - Proper UG vs PG regulation separation
+    
+    Example:
+    - CSE (UG) + R2017: effective 2017-2022
+    - CSE (UG) + R2023: effective 2023-NULL (ongoing)
+    - CSE (PG) + R2017: effective 2017-NULL (still active for PG)
+    """
+    
+    program = models.ForeignKey(
+        Program, 
+        on_delete=models.CASCADE, 
+        related_name='regulation_mappings',
+        help_text="The academic program"
+    )
+    regulation = models.ForeignKey(
+        Regulation, 
+        on_delete=models.CASCADE, 
+        related_name='program_mappings',
+        help_text="The regulation/curriculum this program follows"
+    )
+    effective_from_year = models.IntegerField(
+        validators=[MinValueValidator(2000), MaxValueValidator(2100)],
+        help_text="First admission year this regulation applies to"
+    )
+    effective_to_year = models.IntegerField(
+        null=True, 
+        blank=True,
+        validators=[MinValueValidator(2000), MaxValueValidator(2100)],
+        help_text="Last admission year this applies to (NULL = still active)"
+    )
+    is_active = models.BooleanField(default=True, help_text="Whether this mapping is currently active")
+    notes = models.TextField(blank=True, help_text="Any notes about this regulation mapping")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ['program', '-effective_from_year']
+        verbose_name = 'Program Regulation Mapping'
+        verbose_name_plural = 'Program Regulation Mappings'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['program', 'regulation'], 
+                name='unique_program_regulation_mapping'
+            ),
+        ]
+    
+    def __str__(self):
+        if self.effective_to_year:
+            return f"{self.program.code} ({self.program.level}) → {self.regulation} [{self.effective_from_year}-{self.effective_to_year}]"
+        return f"{self.program.code} ({self.program.level}) → {self.regulation} [{self.effective_from_year}-present]"
+    
+    def clean(self):
+        """Validate that effective_to_year >= effective_from_year if set"""
+        if self.effective_to_year and self.effective_to_year < self.effective_from_year:
+            from django.core.exceptions import ValidationError
+            raise ValidationError({
+                'effective_to_year': 'End year must be greater than or equal to start year'
+            })
+    
+    @classmethod
+    def get_regulation_for_student(cls, program_code, program_level, admission_year):
+        """
+        Find the appropriate regulation for a student based on their program and admission year.
+        
+        Args:
+            program_code: e.g., 'CSE'
+            program_level: 'UG' or 'PG'
+            admission_year: Year of admission (e.g., 2023)
+            
+        Returns:
+            Regulation object or None
+        """
+        from django.db.models import Q
+        
+        mapping = cls.objects.filter(
+            program__code=program_code,
+            program__level=program_level,
+            effective_from_year__lte=admission_year,
+            is_active=True
+        ).filter(
+            Q(effective_to_year__gte=admission_year) | Q(effective_to_year__isnull=True)
+        ).order_by('-effective_from_year').first()
+        
+        return mapping.regulation if mapping else None
+    
+    @classmethod
+    def get_active_mappings_for_program(cls, program):
+        """Get all active regulation mappings for a program"""
+        return cls.objects.filter(program=program, is_active=True).order_by('-effective_from_year')
 
 
 class AcademicYear(models.Model):
@@ -736,7 +843,14 @@ class ProgramBatch(models.Model):
         if year_of_study:
             qs = qs.filter(year_of_study=year_of_study)
         
-        return [(b.batch_name, b.batch_display) for b in qs.distinct('batch_name').order_by('batch_name')]
+        # Use values_list + distinct to avoid PostgreSQL-specific distinct('field')
+        seen = set()
+        choices = []
+        for b in qs.order_by('batch_name'):
+            if b.batch_name not in seen:
+                seen.add(b.batch_name)
+                choices.append((b.batch_name, b.batch_display))
+        return choices
     
     @classmethod
     def has_students(cls, academic_year, program, year_of_study):
@@ -787,6 +901,274 @@ class ProgramBatch(models.Model):
                 created_names.append(label)
         
         return created_count, created_names
+
+
+class AdmissionBatch(models.Model):
+    """
+    Admission Batch - Tracks a cohort of students admitted in a specific year.
+    
+    This ties together:
+    - Program (B.E. CSE, M.E. CSE-BDA, etc.)
+    - Admission Year (the calendar year they joined, e.g., 2024, 2025)
+    - Batch Labels (A, B, C or N, P, Q - configurable per admission batch)
+    - Regulation (R2021, etc.)
+    
+    Note: Lateral entry students (UG only) are assigned to the SAME batches as 
+    regular students. The entry_type is tracked on Student_Profile, not here.
+    Lateral students automatically start from 3rd semester.
+    
+    Example:
+    - B.E. CSE 2024: 4 batches (A, B, C, D), 240 capacity
+      - Regular students: join 1st sem, batches A,B,C,D
+      - Lateral students: join 3rd sem, same batches A,B,C,D
+    - B.E. CSE 2025: 4 batches (A, B, C, D), 240 capacity
+    
+    When you click 'B.E. CSE', you can see all admission years and their batches.
+    """
+    
+    program = models.ForeignKey(Program, on_delete=models.CASCADE, related_name='admission_batches')
+    admission_year = models.IntegerField(
+        validators=[MinValueValidator(2000), MaxValueValidator(2100)],
+        help_text="Calendar year of admission (e.g., 2024, 2025)"
+    )
+    regulation = models.ForeignKey(
+        Regulation, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='admission_batches',
+        help_text="Regulation under which this batch studies"
+    )
+    batch_labels = models.CharField(
+        max_length=100, 
+        default='A,B,C',
+        help_text="Comma-separated batch labels (e.g., 'A,B,C' or 'N,P,Q')"
+    )
+    capacity_per_batch = models.IntegerField(
+        default=60, 
+        validators=[MinValueValidator(1)],
+        help_text="Maximum students per batch/section"
+    )
+    lateral_intake_per_batch = models.IntegerField(
+        default=10,
+        validators=[MinValueValidator(0)],
+        help_text="Maximum lateral entry students per batch (UG only). Set to 0 to disable lateral entry."
+    )
+    is_active = models.BooleanField(default=True)
+    remarks = models.TextField(blank=True, null=True, help_text="Optional notes about this admission batch")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ('program', 'admission_year')
+        ordering = ['-admission_year', 'program']
+        verbose_name = 'Admission Batch'
+        verbose_name_plural = 'Admission Batches'
+    
+    def __str__(self):
+        return f"{self.program.code} {self.admission_year}"
+    
+    @property
+    def batch_list(self):
+        """Return list of batch labels"""
+        return [b.strip().upper() for b in self.batch_labels.split(',') if b.strip()]
+    
+    @property
+    def batch_count(self):
+        """Number of batches/sections"""
+        return len(self.batch_list)
+    
+    @property
+    def total_capacity(self):
+        """Total capacity across all batches (regular students)"""
+        return self.batch_count * self.capacity_per_batch
+    
+    @property
+    def total_lateral_capacity(self):
+        """Total lateral intake capacity (UG only)"""
+        if self.program.level != 'UG':
+            return 0
+        return self.batch_count * self.lateral_intake_per_batch
+    
+    @property
+    def allows_lateral_entry(self):
+        """Check if this batch allows lateral entry"""
+        return self.program.level == 'UG' and self.lateral_intake_per_batch > 0
+    
+    @property
+    def student_count(self):
+        """Count all students in this admission batch"""
+        return self.students.filter(status='ACTIVE').count()
+    
+    @property
+    def regular_student_count(self):
+        """Count regular entry students"""
+        return self.students.filter(status='ACTIVE', entry_type='REGULAR').count()
+    
+    @property
+    def lateral_student_count(self):
+        """Count lateral entry students"""
+        return self.students.filter(status='ACTIVE', entry_type='LATERAL').count()
+    
+    @property
+    def expected_graduation_year(self):
+        """Calculate expected graduation year for regular entry students"""
+        return self.admission_year + self.program.duration_years
+    
+    def get_current_semester_for_regular(self):
+        """
+        Calculate current semester for regular entry students based on admission year.
+        """
+        from django.utils import timezone
+        today = timezone.now().date()
+        current_year = today.year
+        current_month = today.month
+        
+        years_passed = current_year - self.admission_year
+        
+        if current_month >= 8:  # Aug onwards = Odd semester
+            semester_offset = years_passed * 2 + 1
+        elif current_month <= 5:  # Jan-May = Even semester
+            semester_offset = (years_passed - 1) * 2 + 2 if years_passed > 0 else 2
+        else:  # June-July = Summer break
+            semester_offset = years_passed * 2
+        
+        max_sem = self.program.total_semesters
+        return min(semester_offset, max_sem)
+    
+    def get_current_semester_for_lateral(self):
+        """
+        Calculate current semester for lateral entry students.
+        Lateral students start from 3rd semester.
+        """
+        regular_sem = self.get_current_semester_for_regular()
+        # Lateral students are 2 semesters ahead (they skip sem 1 & 2)
+        return min(regular_sem + 2, self.program.total_semesters)
+    
+    def is_batch_label_valid(self, batch_label):
+        """Check if a batch label is valid for this admission batch"""
+        return batch_label.upper() in self.batch_list
+    
+    def get_students_in_batch(self, batch_label, entry_type=None):
+        """Get all students in a specific batch"""
+        qs = self.students.filter(batch_label=batch_label.upper(), status='ACTIVE')
+        if entry_type:
+            qs = qs.filter(entry_type=entry_type)
+        return qs
+    
+    def get_batch_student_counts(self):
+        """Get student counts per batch label"""
+        counts = {}
+        for label in self.batch_list:
+            regular = self.students.filter(batch_label=label, entry_type='REGULAR', status='ACTIVE').count()
+            lateral = self.students.filter(batch_label=label, entry_type='LATERAL', status='ACTIVE').count()
+            counts[label] = {'regular': regular, 'lateral': lateral, 'total': regular + lateral}
+        return counts
+    
+    @classmethod
+    def get_for_program(cls, program_code, admission_year=None, active_only=True):
+        """Get admission batches for a program"""
+        qs = cls.objects.filter(program__code=program_code)
+        if admission_year:
+            qs = qs.filter(admission_year=admission_year)
+        if active_only:
+            qs = qs.filter(is_active=True)
+        return qs.order_by('-admission_year')
+    
+    @classmethod
+    def get_batch_choices_for_admission(cls, program_code, admission_year):
+        """Get batch label choices for student admission"""
+        try:
+            batch = cls.objects.get(
+                program__code=program_code,
+                admission_year=admission_year,
+                is_active=True
+            )
+            return [(b, f"{b} Section") for b in batch.batch_list]
+        except cls.DoesNotExist:
+            return []
+    
+    @classmethod
+    def can_admit_students(cls, program_code, admission_year, entry_type, academic_year=None):
+        """
+        Validate if students can be admitted.
+        Rules:
+        - Students can only be admitted during ODD semester of academic year
+        - Regular entry: admitted to 1st semester (1st year)
+        - Lateral entry: admitted to 3rd semester (2nd year), UG only
+        
+        Returns tuple: (can_admit: bool, message: str)
+        """
+        from django.utils import timezone
+        
+        # Check if admission batch exists
+        try:
+            batch = cls.objects.get(
+                program__code=program_code,
+                admission_year=admission_year,
+                is_active=True
+            )
+        except cls.DoesNotExist:
+            return False, f"No admission batch configured for {program_code} {admission_year}"
+        
+        # Validate lateral entry is only for UG
+        if entry_type == 'LATERAL':
+            if batch.program.level != 'UG':
+                return False, "Lateral entry is only available for Undergraduate (UG) programs"
+            if not batch.allows_lateral_entry:
+                return False, "Lateral entry is disabled for this admission batch"
+        
+        # Get current/relevant semester from academic year
+        if academic_year:
+            today = timezone.now().date()
+            
+            # Find odd semesters in the academic year
+            if hasattr(academic_year, 'semesters'):
+                odd_semesters = academic_year.semesters.filter(semester_number__in=[1, 3, 5, 7])
+                
+                # Check if current date falls within an odd semester
+                current_odd_sem = odd_semesters.filter(
+                    start_date__lte=today,
+                    end_date__gte=today
+                ).first()
+                
+                if not current_odd_sem:
+                    # Check if any odd semester is upcoming
+                    upcoming_odd = odd_semesters.filter(start_date__gt=today).first()
+                    if upcoming_odd:
+                        return False, f"Admissions will open when odd semester starts ({upcoming_odd.start_date})"
+                    return False, "Students can only be admitted during odd semesters"
+        
+        # Validate entry type
+        if entry_type == 'REGULAR':
+            return True, "Can admit freshers to 1st semester"
+        elif entry_type == 'LATERAL':
+            return True, "Can admit lateral entry students to 3rd semester"
+        
+        return False, "Invalid entry type"
+    
+    @classmethod
+    def create_default_for_program(cls, program, admission_year, regulation=None):
+        """
+        Create default admission batch using program's default settings.
+        Returns tuple: (batch, created)
+        """
+        default_labels = program.default_batch_labels or 'A,B,C'
+        default_capacity = 60
+        # Lateral intake only for UG programs
+        lateral_intake = 10 if program.level == 'UG' else 0
+        
+        return cls.objects.get_or_create(
+            program=program,
+            admission_year=admission_year,
+            defaults={
+                'regulation': regulation,
+                'batch_labels': default_labels,
+                'capacity_per_batch': default_capacity,
+                'lateral_intake_per_batch': lateral_intake,
+                'is_active': True
+            }
+        )
 
 
 # =============================================================================
@@ -862,7 +1244,15 @@ class NonTeachingStaff_Profile(models.Model):
 
 
 class Student_Profile(models.Model):
-    """Profile for Students"""
+    """
+    Profile for Students.
+    
+    Students are linked to an AdmissionBatch which tracks:
+    - Which program they belong to
+    - What year they were admitted
+    - Entry type (Regular 1st sem or Lateral 3rd sem)
+    - Which batch/section they belong to
+    """
     
     STATUS_CHOICES = [
         ('ACTIVE', 'Active'),
@@ -872,23 +1262,49 @@ class Student_Profile(models.Model):
         ('TRANSFERRED', 'Transferred'),
     ]
     
+    ENTRY_TYPE_CHOICES = [
+        ('REGULAR', 'Regular Entry (1st Semester)'),
+        ('LATERAL', 'Lateral Entry (3rd Semester)'),
+    ]
+    
     register_validator = RegexValidator(
-        regex=r'^\d{12}$',
-        message='Register number must be exactly 12 digits'
+        regex=r'^\d{10}$',
+        message='Register number must be exactly 10 digits'
     )
     
     user = models.OneToOneField(Account_User, on_delete=models.CASCADE, related_name='student_profile')
-    register_no = models.CharField(max_length=12, unique=True, validators=[register_validator],
+    register_no = models.CharField(max_length=10, unique=True, validators=[register_validator],
                                     verbose_name='Register Number')
-    batch_label = models.CharField(max_length=10, default='A', 
-                                    verbose_name='Classroom Section')
-    branch = models.CharField(max_length=20, default='CSE', help_text="Program code from Program model")
+    
+    # Link to AdmissionBatch - this ties the student to their admission cohort
+    admission_batch = models.ForeignKey(
+        'AdmissionBatch', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='students',
+        help_text="The admission batch/cohort this student belongs to"
+    )
+    batch_label = models.CharField(max_length=10, blank=True, 
+                                    verbose_name='Classroom Section',
+                                    help_text="Must be one of the labels from admission_batch.batch_labels")
+    
+    # These fields are derived from admission_batch but kept for backwards compatibility
+    # and for cases where admission_batch might not be set
+    branch = models.CharField(max_length=20, blank=True, help_text="Program code from Program model")
     program_type = models.CharField(max_length=5, choices=PROGRAM_TYPE_CHOICES, default='UG')
     regulation = models.ForeignKey(Regulation, on_delete=models.SET_NULL, null=True, blank=True,
                                     related_name='students')
+    entry_type = models.CharField(
+        max_length=10, 
+        choices=ENTRY_TYPE_CHOICES, 
+        default='REGULAR',
+        help_text="Regular = joined in 1st sem, Lateral = joined in 3rd sem"
+    )
+    
     current_sem = models.IntegerField(default=1, validators=[MinValueValidator(1), MaxValueValidator(8)])
     status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='ACTIVE')
-    admission_year = models.IntegerField(null=True, blank=True)
+    admission_year = models.IntegerField(null=True, blank=True, help_text="Calendar year of admission")
     graduation_year = models.IntegerField(null=True, blank=True, help_text="Year of graduation (set when student completes 8th sem)")
     advisor = models.ForeignKey(Faculty_Profile, on_delete=models.SET_NULL, null=True, blank=True,
                                  related_name='advisees', verbose_name='Faculty Advisor/Counselor')
@@ -957,6 +1373,125 @@ class Student_Profile(models.Model):
         except:
             pass
         return f"{self.batch_label} Section"  # Fallback
+    
+    @property
+    def is_lateral_entry(self):
+        """Check if student is a lateral entry"""
+        return self.entry_type == 'LATERAL'
+    
+    @property
+    def college_email(self):
+        """Generate college email from register number: <register_no>@student.annauniv.edu"""
+        return f"{self.register_no}@student.annauniv.edu"
+    
+    @property
+    def admission_batch_info(self):
+        """Get formatted admission batch info"""
+        if self.admission_batch:
+            entry = 'LE' if self.is_lateral_entry else 'RE'
+            return f"{self.branch} {self.admission_year} ({entry}) - {self.batch_label}"
+        return f"{self.branch} {self.admission_year or 'N/A'} - {self.batch_label}"
+    
+    def validate_batch_label(self):
+        """Validate that batch_label is valid for the admission_batch"""
+        if self.admission_batch:
+            if not self.admission_batch.is_batch_label_valid(self.batch_label):
+                valid_labels = ', '.join(self.admission_batch.batch_list)
+                raise ValueError(
+                    f"Invalid batch label '{self.batch_label}'. "
+                    f"Valid labels for this admission batch: {valid_labels}"
+                )
+        return True
+    
+    def sync_from_admission_batch(self):
+        """
+        Sync student fields from admission_batch.
+        Call this when setting admission_batch to auto-populate related fields.
+        """
+        if self.admission_batch:
+            self.branch = self.admission_batch.program.code
+            self.program_type = self.admission_batch.program.level
+            self.regulation = self.admission_batch.regulation
+            self.admission_year = self.admission_batch.admission_year
+            # Set starting semester based on entry type
+            if not self.pk:  # Only for new students
+                if self.entry_type == 'LATERAL':
+                    self.current_sem = 3  # Lateral students start from 3rd semester
+                else:
+                    self.current_sem = 1  # Regular students start from 1st semester
+    
+    def clean(self):
+        """Model validation"""
+        from django.core.exceptions import ValidationError
+        
+        # Validate batch label
+        try:
+            self.validate_batch_label()
+        except ValueError as e:
+            raise ValidationError({'batch_label': str(e)})
+        
+        # Validate lateral entry is only for UG programs
+        if self.entry_type == 'LATERAL':
+            if self.program_type != 'UG':
+                raise ValidationError({
+                    'entry_type': 'Lateral entry is only available for Undergraduate (UG) programs'
+                })
+            # Check if admission batch allows lateral entry
+            if self.admission_batch and not self.admission_batch.allows_lateral_entry:
+                raise ValidationError({
+                    'entry_type': 'Lateral entry is disabled for this admission batch'
+                })
+        
+        # Validate entry type matches current semester
+        if self.entry_type == 'LATERAL' and self.current_sem < 3:
+            raise ValidationError({
+                'current_sem': 'Lateral entry students must start from 3rd semester or higher'
+            })
+        
+        # If admission_batch is set but admission_year doesn't match, warn
+        if self.admission_batch and self.admission_year:
+            if self.admission_year != self.admission_batch.admission_year:
+                raise ValidationError({
+                    'admission_year': f'Admission year ({self.admission_year}) does not match '
+                                     f'admission batch year ({self.admission_batch.admission_year})'
+                })
+    
+    def save(self, *args, **kwargs):
+        """Override save to sync from admission_batch and validate"""
+        # Sync from admission batch if set and this is a new record
+        if self.admission_batch and not self.pk:
+            self.sync_from_admission_batch()
+        
+        super().save(*args, **kwargs)
+    
+    @classmethod
+    def get_classmates(cls, student):
+        """Get all students in the same admission batch and section"""
+        if student.admission_batch:
+            return cls.objects.filter(
+                admission_batch=student.admission_batch,
+                batch_label=student.batch_label,
+                status='ACTIVE'
+            ).exclude(pk=student.pk)
+        return cls.objects.none()
+    
+    @classmethod
+    def get_batch_students(cls, admission_batch, batch_label=None):
+        """Get all students in an admission batch, optionally filtered by section"""
+        qs = cls.objects.filter(admission_batch=admission_batch, status='ACTIVE')
+        if batch_label:
+            qs = qs.filter(batch_label=batch_label.upper())
+        return qs.order_by('batch_label', 'register_no')
+    
+    @classmethod
+    def get_program_students(cls, program_code, admission_year=None, entry_type=None):
+        """Get all students for a program, with optional filters"""
+        qs = cls.objects.filter(branch=program_code, status='ACTIVE')
+        if admission_year:
+            qs = qs.filter(admission_year=admission_year)
+        if entry_type:
+            qs = qs.filter(entry_type=entry_type)
+        return qs.order_by('-admission_year', 'batch_label', 'register_no')
 
 
 # =============================================================================
@@ -1192,6 +1727,62 @@ class ElectiveCourseOffering(models.Model):
         return is_valid, total_capacity, shortfall
 
 
+class ElectiveOfferingFacultyAssignment(models.Model):
+    """
+    Faculty assignment for each batch of an elective course offering.
+    
+    Example: If Data Mining has 2 batches:
+    - Batch 1: Faculty A (+ Lab Assistant X if L/LIT)
+    - Batch 2: Faculty B (+ Lab Assistant Y if L/LIT)
+    """
+    
+    offering = models.ForeignKey(
+        'ElectiveCourseOffering',
+        on_delete=models.CASCADE,
+        related_name='faculty_assignments',
+        help_text="The elective course offering"
+    )
+    
+    batch_number = models.IntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(10)],
+        help_text="Batch number (1, 2, 3, etc.)"
+    )
+    
+    faculty = models.ForeignKey(
+        'Faculty_Profile',
+        on_delete=models.CASCADE,
+        related_name='elective_assignments',
+        help_text="Faculty assigned to this batch"
+    )
+    
+    lab_assistant = models.ForeignKey(
+        'Faculty_Profile',
+        on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='elective_lab_assistant_assignments',
+        help_text="Lab assistant for L/LIT courses"
+    )
+    
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        unique_together = ('offering', 'batch_number')
+        ordering = ['offering', 'batch_number']
+        verbose_name = 'Elective Offering Faculty Assignment'
+        verbose_name_plural = 'Elective Offering Faculty Assignments'
+    
+    def __str__(self):
+        return f"{self.offering.actual_course.course_code} Batch {self.batch_number} - {self.faculty.user.full_name}"
+    
+    @property
+    def needs_lab_assistant(self):
+        """Check if this offering needs a lab assistant"""
+        course = self.offering.actual_course
+        return course.course_type in ['L', 'LIT'] or course.practical_hours > 0
+
+
 class Course_Assignment(models.Model):
     """
     Links Course to Faculty for a specific batch and semester.
@@ -1200,6 +1791,9 @@ class Course_Assignment(models.Model):
     
     course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name='assignments')
     faculty = models.ForeignKey(Faculty_Profile, on_delete=models.CASCADE, related_name='course_assignments')
+    lab_assistant = models.ForeignKey(Faculty_Profile, on_delete=models.SET_NULL, null=True, blank=True,
+                                       related_name='lab_assistant_assignments',
+                                       help_text="Lab assistant (faculty) for L/LIT courses")
     batch = models.ForeignKey('ProgramBatch', on_delete=models.CASCADE, null=True, blank=True, related_name='course_assignments')
     batch_label = models.CharField(max_length=1, blank=True)  # Legacy field for backward compatibility
     academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE)
@@ -1216,6 +1810,11 @@ class Course_Assignment(models.Model):
     
     def __str__(self):
         return f"{self.course.course_code} - {self.faculty.user.full_name} ({self.batch_label})"
+    
+    @property
+    def needs_lab_assistant(self):
+        """Check if this course needs a lab assistant (L or LIT courses)"""
+        return self.course.course_type in ['L', 'LIT'] or self.course.practical_hours > 0
 
 
 class Attendance(models.Model):
@@ -2088,7 +2687,7 @@ def create_user_profile(sender, instance, created, **kwargs):
             Student_Profile.objects.get_or_create(
                 user=instance,
                 defaults={
-                    'register_no': f'000000000000',  # Placeholder - must be updated
+                    'register_no': f'0000000000',  # 10-digit placeholder - must be updated
                     'batch_label': 'N'
                 }
             )

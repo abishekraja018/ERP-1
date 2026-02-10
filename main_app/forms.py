@@ -129,8 +129,20 @@ class FacultyRegistrationForm(FormSettings):
 class StudentRegistrationForm(FormSettings):
     """Combined form for Student user + profile creation
     Note: Password is not required here - students set their own password via OTP first-time login
-    Fields match bulk upload CSV format for consistency.
+    
+    Simplified logic:
+    - Regular entry → 1st semester, current year, follows regulation of admission year
+    - Lateral entry → 3rd semester, current year, follows regulation of batch they're joining (started 1 year earlier)
+    
+    Example (if R2021 and R2025 exist):
+    - Regular 2026 → R2025 (latest reg ≤ 2026)
+    - Lateral 2026 → R2021 (joins batch that started 2025, so latest reg ≤ 2025 = R2021)
     """
+    
+    ENTRY_TYPE_CHOICES = [
+        ('REGULAR', 'Regular Entry (1st Semester)'),
+        ('LATERAL', 'Lateral Entry (3rd Semester)'),
+    ]
     
     # User fields (required)
     full_name = forms.CharField(required=True, max_length=200, label='Full Name')
@@ -142,24 +154,31 @@ class StudentRegistrationForm(FormSettings):
     register_no = forms.CharField(max_length=10, required=True, label='Register Number',
                                   help_text='10-digit register number (e.g., 2023103543)')
     program_type = forms.ChoiceField(choices=PROGRAM_TYPE_CHOICES, label='Program Type')
-    branch = forms.ChoiceField(choices=[], label='Branch')  # Populated dynamically
+    branch = forms.ChoiceField(choices=[], label='Branch',
+                               help_text='Regulation is auto-assigned based on entry type')
     batch_label = forms.ChoiceField(choices=[], label='Batch (Section)')  # Populated dynamically
-    admission_year = forms.IntegerField(min_value=2000, max_value=2100, required=True, label='Admission Year')
-    current_sem = forms.IntegerField(min_value=1, max_value=8, initial=1, label='Current Semester')
+    entry_type = forms.ChoiceField(choices=ENTRY_TYPE_CHOICES, label='Entry Type',
+                                   help_text='Regular = 1st sem (uses current reg). Lateral = 3rd sem (uses reg of batch started 1 year ago).')
     
     # Optional fields
     phone = forms.CharField(max_length=15, required=False, label='Phone Number')
     
     class Meta:
         model = Student_Profile
-        fields = ['register_no', 'batch_label', 'branch', 'program_type',
-                  'current_sem', 'admission_year']
+        fields = ['register_no', 'batch_label', 'branch', 'program_type', 'entry_type']
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        # Load branch choices from Program model
+        # Load unique branch codes from Program model
+        # Regulation is auto-assigned based on admission year, so we only need unique codes
         programs = Program.objects.all().order_by('level', 'code')
-        branch_choices = [(p.code, f"{p.code} - {p.name}" if not p.specialization else f"{p.code} - {p.specialization}") for p in programs]
+        seen_codes = set()
+        branch_choices = []
+        for p in programs:
+            if p.code not in seen_codes:
+                seen_codes.add(p.code)
+                label = f"{p.code} - {p.name}" if not p.specialization else f"{p.code} - {p.specialization}"
+                branch_choices.append((p.code, label))
         self.fields['branch'].choices = branch_choices if branch_choices else [('', 'No programs available')]
         
         # Load batch choices from ProgramBatch model (all available batches)
@@ -172,7 +191,7 @@ class StudentRegistrationForm(FormSettings):
             batch_choices = list(batches)
         else:
             batch_choices = []
-        self.fields['batch_label'].choices = batch_choices if batch_choices else [('A', 'A Section')]
+        self.fields['batch_label'].choices = batch_choices if batch_choices else [('', 'No batches available - configure academic year first')]
     
     def clean_email(self):
         email = self.cleaned_data['email'].lower()
@@ -271,10 +290,7 @@ class RegulationForm(FormSettings):
     
     class Meta:
         model = Regulation
-        fields = ['year', 'name', 'description', 'effective_from']
-        widgets = {
-            'effective_from': DateInput(attrs={'type': 'date'}),
-        }
+        fields = ['year', 'name', 'description']
 
 
 class ProgramForm(FormSettings):
@@ -284,15 +300,15 @@ class ProgramForm(FormSettings):
         model = Program
         fields = ['code', 'name', 'degree', 'level', 'specialization', 
                   'duration_years', 'total_semesters', 'default_batch_count', 
-                  'default_batch_labels', 'regulations']
+                  'default_batch_labels', 'regulation']
         widgets = {
-            'regulations': forms.CheckboxSelectMultiple(attrs={'class': 'list-unstyled'}),
+            'regulation': forms.Select(attrs={'class': 'form-control select2'}),
         }
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields['specialization'].required = False
-        self.fields['regulations'].required = False
+        self.fields['regulation'].required = True  # Required in form even though DB allows null
         # Make batch config optional - will use model defaults
         self.fields['default_batch_count'].required = False
         self.fields['default_batch_labels'].required = False
@@ -675,10 +691,10 @@ class QuestionPaperAssignmentForm(FormSettings):
             user__is_active=True
         ).select_related('user')
         self.fields['course'].queryset = Course.objects.all().order_by('course_code')
-        self.fields['academic_year'].queryset = AcademicYear.objects.all().order_by('-start_date')
+        self.fields['academic_year'].queryset = AcademicYear.objects.all().order_by('-year')
         self.fields['semester'].queryset = Semester.objects.all().order_by('-academic_year', 'semester_number')
         # Pull regulations from database
-        self.fields['regulation'].queryset = Regulation.objects.filter(is_active=True).order_by('-year')
+        self.fields['regulation'].queryset = Regulation.objects.all().order_by('-year')
         self.fields['regulation'].required = False
 
 
@@ -743,9 +759,9 @@ class TimetableForm(FormSettings):
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields['academic_year'].queryset = AcademicYear.objects.all().order_by('-start_date')
+        self.fields['academic_year'].queryset = AcademicYear.objects.all().order_by('-year')
         self.fields['semester'].queryset = Semester.objects.all().order_by('-academic_year', 'semester_number')
-        self.fields['regulation'].queryset = Regulation.objects.filter(is_active=True).order_by('-year')
+        self.fields['regulation'].queryset = Regulation.objects.all().order_by('-year')
         self.fields['regulation'].required = False
 
 
@@ -938,7 +954,7 @@ class UploadQuestionPaperForm(FormSettings):
         widget=forms.Select(attrs={'class': 'form-control'})
     )
     regulation = forms.ModelChoiceField(
-        queryset=Regulation.objects.filter(is_active=True),
+        queryset=Regulation.objects.all(),
         widget=forms.Select(attrs={'class': 'form-control'})
     )
     exam_month_year = forms.CharField(
@@ -960,7 +976,7 @@ class UploadQuestionPaperForm(FormSettings):
         self.fields['course'].queryset = Course.objects.filter(is_active=True).order_by('course_code')
         self.fields['academic_year'].queryset = AcademicYear.objects.all().order_by('-year')
         self.fields['semester'].queryset = Semester.objects.all().order_by('-academic_year', 'semester_number')
-        self.fields['regulation'].queryset = Regulation.objects.filter(is_active=True).order_by('-year')
+        self.fields['regulation'].queryset = Regulation.objects.all().order_by('-year')
     
     def clean_uploaded_document(self):
         file = self.cleaned_data.get('uploaded_document')

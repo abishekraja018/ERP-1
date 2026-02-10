@@ -56,11 +56,14 @@
                                 <div class="card h-100 bg-light">
                                     <div class="card-body text-center">
                                         <h5 class="card-title mb-1">{{ program.code }}</h5>
-                                        <p class="card-text text-muted small mb-2">{{ program.name }}</p>
+                                        <p class="card-text text-muted small mb-1">{{ program.name }}</p>
                                         <p class="mb-2">
                                             <span class="badge badge-{% if program.level == 'UG' %}primary{% else %}success{% endif %}">
                                                 {{ program.get_level_display }}
                                             </span>
+                                            {% if program.regulation %}
+                                            <span class="badge badge-secondary">R{{ program.regulation.year }}</span>
+                                            {% endif %}
                                         </p>
                                         <p class="small text-muted mb-2">
                                             Default: {{ program.default_batch_count }} batch(es)<br>
@@ -108,7 +111,7 @@
                                             <option value="">-- Select Program --</option>
                                             {% for program in programs %}
                                             <option value="{{ program.id }}">
-                                                {{ program.code }} - {{ program.name }}
+                                                {{ program.code }} - {{ program.name }}{% if program.regulation %} (R{{ program.regulation.year }}){% endif %}
                                             </option>
                                             {% endfor %}
                                         </select>
@@ -208,6 +211,9 @@
                                     <tr class="{% if data.has_students %}table-secondary{% endif %}">
                                         <td>
                                             <strong>{{ data.program.code }}</strong>
+                                            {% if data.program.regulation %}
+                                            <span class="badge badge-secondary ml-1">R{{ data.program.regulation.year }}</span>
+                                            {% endif %}
                                             <br><small class="text-muted">{{ data.program.name }}</small>
                                         </td>
                                         <td>

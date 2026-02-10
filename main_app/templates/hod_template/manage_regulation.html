@@ -23,7 +23,6 @@
                                     <th>#</th>
                                     <th>Name</th>
                                     <th>Year</th>
-                                    <th>Effective From</th>
                                     <th>Course Categories</th>
                                     <th>Active Students</th>
                                     <th>Actions</th>
@@ -35,7 +34,6 @@
                                     <td>{{ forloop.counter }}</td>
                                     <td>{{ regulation.name|default:regulation }}</td>
                                     <td>{{ regulation.year }}</td>
-                                    <td>{{ regulation.effective_from|date:"d M Y"|default:"-" }}</td>
                                     <td>
                                         {% for cat in regulation.course_categories.all %}
                                             <span class="badge badge-info" title="{{ cat.get_code_display }}">{{ cat.code }}</span>
@@ -44,7 +42,7 @@
                                         {% endfor %}
                                     </td>
                                     <td>
-                                        {% if regulation.is_active %}
+                                        {% if regulation.active_student_count > 0 %}
                                         <span class="badge badge-success">{{ regulation.active_student_count }} Students</span>
                                         {% else %}
                                         <span class="badge badge-secondary">No Active Students</span>

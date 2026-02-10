@@ -119,7 +119,7 @@ class Student_Profile(models.Model):
                                     help_text="Legacy field - use batch ForeignKey instead")
     batch = models.ForeignKey('main_app.ProgramBatch', on_delete=models.SET_NULL, null=True, blank=True,
                                related_name='students', verbose_name='Classroom Batch')
-    branch = models.CharField(max_length=20, default='CSE', help_text="Program code from Program model")
+    branch = models.CharField(max_length=20, blank=True, help_text="Program code from Program model")
     program_type = models.CharField(max_length=5, choices=PROGRAM_TYPE_CHOICES, default='UG')
     program = models.ForeignKey(Program, on_delete=models.SET_NULL, null=True, blank=True,
                                  related_name='students', verbose_name='Academic Program',

@@ -64,7 +64,7 @@
                 <div class="card card-outline card-primary">
                     <div class="card-header">
                         <h3 class="card-title">
-                            <i class="fas fa-calendar-check mr-2"></i>Step 1: Select Semester & Section
+                            <i class="fas fa-calendar-check mr-2"></i>Step 1: Select Semester
                         </h3>
                     </div>
                     <div class="card-body">
@@ -78,6 +78,7 @@
                                             {% for sem in semesters %}
                                             <option value="{{ sem.id }}" {% if selected_semester == sem.id|stringformat:"i" %}selected{% endif %}>
                                                 {{ sem.academic_year }} - Sem {{ sem.semester_number }} ({{ sem.semester_type }})
+                                                {% if sem.is_current %} ★{% endif %}
                                             </option>
                                             {% endfor %}
                                         </select>
@@ -86,7 +87,7 @@
                                 <div class="col-md-2">
                                     <div class="form-group mb-0">
                                         <label><i class="fas fa-graduation-cap mr-1"></i>Program</label>
-                                        <select name="program_type" id="programTypeFilter" class="form-control">
+                                        <select name="program_type" id="programTypeFilter" class="form-control" onchange="this.form.submit()">
                                             {% for code, name in program_levels %}
                                             <option value="{{ code }}" {% if selected_program == code %}selected{% endif %}>{{ name }}</option>
                                             {% endfor %}
@@ -107,19 +108,8 @@
                                         </select>
                                     </div>
                                 </div>
-                                <div class="col-md-2">
-                                    <div class="form-group mb-0">
-                                        <label><i class="fas fa-users mr-1"></i>Section</label>
-                                        <select name="batch" id="batchFilter" class="form-control">
-                                            <option value="">All Sections</option>
-                                            {% for code, name in batch_choices %}
-                                            <option value="{{ code }}" {% if selected_batch == code %}selected{% endif %}>{{ name }}</option>
-                                            {% endfor %}
-                                        </select>
-                                    </div>
-                                </div>
                                 <div class="col-md-3">
-                                    <button type="submit" class="btn btn-primary btn-block">
+                                    <button type="submit" class="btn btn-primary btn-block" style="margin-top: 30px;">
                                         <i class="fas fa-search mr-1"></i> Load Courses
                                     </button>
                                 </div>
@@ -142,13 +132,22 @@
                         </div>
                         <div class="col-md-3">
                             <h5><i class="fas fa-users mr-2"></i>{{ student_count }} Students</h5>
-                            <p class="mb-0">{{ selected_branch }} - {% if selected_batch %}{{ selected_batch }}{% else %}All Sections{% endif %}</p>
+                            <p class="mb-0">{{ selected_branch }} ({{ batch_choices|length }} sections)</p>
                         </div>
                         <div class="col-md-3">
                             <h5><i class="fas fa-book mr-2"></i>Regulation</h5>
                             <p class="mb-0">
                                 {% if regulation %}
                                 <span class="badge badge-success badge-lg">{{ regulation }}</span>
+                                {% if regulation_auto_detected %}
+                                <small class="text-muted d-block mt-1">
+                                    <i class="fas fa-magic"></i> Auto-detected (Admission Year: {{ detected_admission_year }})
+                                </small>
+                                {% elif regulation_manual_override %}
+                                <small class="text-muted d-block mt-1">
+                                    <i class="fas fa-hand-pointer"></i> Manually selected
+                                </small>
+                                {% endif %}
                                 {% elif needs_regulation_selection %}
                                 <span class="badge badge-info">Select Below ↓</span>
                                 {% else %}
@@ -222,6 +221,8 @@
                                         <button type="button" class="btn btn-sm btn-primary assign-btn" 
                                                 data-course="{{ plan.course.course_code }}"
                                                 data-title="{{ plan.course.title }}"
+                                                data-course-type="{{ plan.course.course_type }}"
+                                                data-practical-hours="{{ plan.course.practical_hours }}"
                                                 data-toggle="modal" data-target="#assignModal">
                                             <i class="fas fa-user-plus"></i>
                                         </button>
@@ -323,6 +324,8 @@
                                         <button type="button" class="btn btn-sm btn-primary assign-btn"
                                                 data-course="{{ plan.course.course_code }}"
                                                 data-title="{{ plan.course.title }}"
+                                                data-course-type="{{ plan.course.course_type }}"
+                                                data-practical-hours="{{ plan.course.practical_hours }}"
                                                 data-toggle="modal" data-target="#assignModal">
                                             <i class="fas fa-user-plus"></i>
                                         </button>
@@ -342,14 +345,41 @@
                         <i class="fas fa-inbox fa-3x text-muted mb-3"></i>
                         <h5 class="text-muted">No Courses in Plan</h5>
                         {% if regulation %}
-                        <p>No courses found for Semester {{ semester_obj.semester_number }}.</p>
+                        <p>No courses found for Semester {{ semester_obj.semester_number }} under {{ regulation }}.</p>
                         <a href="{% url 'manage_regulation_courses' regulation.id %}" class="btn btn-primary">
                             <i class="fas fa-plus mr-1"></i> Add Courses to Plan
                         </a>
+                        {% if regulation_auto_detected %}
+                        <hr class="mt-4">
+                        <p class="text-muted small mb-2">
+                            <i class="fas fa-info-circle"></i> Detected based on admission year {{ detected_admission_year }}. 
+                            Need a different regulation?
+                        </p>
+                        <form method="GET" action="{% url 'semester_course_assignment' %}" class="d-inline-block" style="min-width: 350px;">
+                            <input type="hidden" name="semester_id" value="{{ selected_semester }}">
+                            <input type="hidden" name="program_type" value="{{ selected_program }}">
+                            <input type="hidden" name="branch" value="{{ selected_branch }}">
+                            {% if selected_batch %}<input type="hidden" name="batch" value="{{ selected_batch }}">{% endif %}
+                            <div class="input-group input-group-sm">
+                                <select name="regulation_id" class="form-control">
+                                    {% for reg in all_regulations %}
+                                    <option value="{{ reg.id }}" {% if regulation.id == reg.id %}selected{% endif %}>
+                                        {{ reg.name }} ({{ reg.year }})
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                <div class="input-group-append">
+                                    <button type="submit" class="btn btn-outline-secondary">
+                                        <i class="fas fa-sync-alt"></i> Change
+                                    </button>
+                                </div>
+                            </div>
+                        </form>
+                        {% endif %}
                         {% elif needs_regulation_selection %}
-                        <p class="text-info mb-3">
-                            <i class="fas fa-info-circle mr-1"></i>
-                            No students found in this semester. Please select a regulation to view its course plan.
+                        <p class="text-warning mb-3">
+                            <i class="fas fa-exclamation-triangle mr-1"></i>
+                            Could not auto-detect regulation. Please select manually.
                         </p>
                         <form method="GET" action="{% url 'semester_course_assignment' %}" class="d-inline-block" style="min-width: 400px;">
                             <input type="hidden" name="semester_id" value="{{ selected_semester }}">
@@ -471,7 +501,6 @@
                 <input type="hidden" name="academic_year_id" value="{% if academic_year %}{{ academic_year.id }}{% endif %}">
                 <input type="hidden" name="branch" value="{{ selected_branch }}">
                 <input type="hidden" name="program_type" value="{{ selected_program }}">
-                <input type="hidden" name="course_code[]" id="modalCourseCode">
                 
                 <div class="modal-body">
                     <div class="form-group">
@@ -479,39 +508,52 @@
                         <input type="text" class="form-control" id="modalCourseDisplay" readonly>
                     </div>
                     
+                    <div id="labAssistantSection" style="display: none;">
+                        <div class="alert alert-warning py-2">
+                            <i class="fas fa-flask mr-1"></i> This is a <strong>Lab/LIT course</strong>. You can optionally assign a Lab Assistant.
+                        </div>
+                    </div>
+                    
                     <div class="form-group">
-                        <label>Select Sections to Assign <span class="text-danger">*</span></label>
-                        <div class="row" id="batchCheckboxes">
+                        <label><i class="fas fa-users mr-1"></i>Assign Faculty to Each Section <span class="text-danger">*</span></label>
+                        <small class="text-muted d-block mb-2">Select faculty for each section. Same faculty can be assigned to multiple sections.</small>
+                        <div id="batchAssignmentRows">
                             {% for code, name in batch_choices %}
-                            <div class="col-md-4">
-                                <div class="custom-control custom-checkbox">
-                                    <input type="checkbox" class="custom-control-input batch-checkbox" 
-                                           name="batch_labels[]" value="{{ code }}" id="batch_{{ code }}">
-                                    <label class="custom-control-label" for="batch_{{ code }}">{{ name }}</label>
+                            <div class="batch-assignment-row mb-2 p-2 border rounded" data-batch="{{ code }}">
+                                <div class="row align-items-center">
+                                    <div class="col-md-3">
+                                        <span class="font-weight-bold">{{ name }}</span>
+                                    </div>
+                                    <div class="col-md-5">
+                                        <select class="form-control form-control-sm batch-faculty-select" data-batch="{{ code }}">
+                                            <option value="">-- Select Faculty --</option>
+                                            {% for faculty in faculty_list %}
+                                            <option value="{{ faculty.id }}">{{ faculty.user.full_name }} ({{ faculty.designation }})</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4 lab-assistant-col" style="display: none;">
+                                        <select class="form-control form-control-sm batch-lab-assistant" data-batch="{{ code }}">
+                                            <option value="">-- Lab Asst (Optional) --</option>
+                                            {% for faculty in faculty_list %}
+                                            <option value="{{ faculty.id }}">{{ faculty.user.full_name }}</option>
+                                            {% endfor %}
+                                        </select>
+                                    </div>
                                 </div>
                             </div>
                             {% endfor %}
                         </div>
                     </div>
                     
-                    <div class="form-group">
-                        <label>Faculty <span class="text-danger">*</span></label>
-                        <select name="faculty_id[]" class="form-control" id="modalFaculty" required>
-                            <option value="">-- Select Faculty --</option>
-                            {% for faculty in faculty_list %}
-                            <option value="{{ faculty.id }}">{{ faculty.user.full_name }} ({{ faculty.designation }})</option>
-                            {% endfor %}
-                        </select>
-                    </div>
-                    
-                    <div class="alert alert-info">
+                    <div class="alert alert-info mt-3">
                         <i class="fas fa-info-circle mr-2"></i>
-                        This will create one assignment per selected section with the same faculty.
+                        Select faculty for at least one section to create assignment(s).
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
-                    <button type="submit" class="btn btn-primary">
+                    <button type="submit" class="btn btn-primary" id="submitAssignBtn" disabled>
                         <i class="fas fa-save mr-1"></i> Create Assignment(s)
                     </button>
                 </div>
@@ -585,37 +627,18 @@
                 <!-- Existing Offerings List -->
                 <div class="card card-outline card-info">
                     <div class="card-header py-2">
-                        <h6 class="mb-0"><i class="fas fa-list mr-1"></i>Current Offerings</h6>
+                        <h6 class="mb-0"><i class="fas fa-list mr-1"></i>Current Offerings & Faculty Assignment</h6>
                     </div>
-                    <div class="card-body p-0">
-                        <table class="table table-sm table-hover mb-0" id="offeringsTable">
-                            <thead class="thead-light">
-                                <tr>
-                                    <th>Course</th>
-                                    <th>Title</th>
-                                    <th>Batches</th>
-                                    <th>Capacity</th>
-                                    <th>Total</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="offeringsTableBody">
-                                <tr class="loading-row">
-                                    <td colspan="6" class="text-center py-3 text-muted">
-                                        Select a placeholder to view offerings
-                                    </td>
-                                </tr>
-                            </tbody>
-                            <tfoot class="bg-light">
-                                <tr>
-                                    <td colspan="4" class="text-right"><strong>Total Capacity:</strong></td>
-                                    <td><strong id="totalCapacity">0</strong></td>
-                                    <td>
-                                        <span id="capacityStatus"></span>
-                                    </td>
-                                </tr>
-                            </tfoot>
-                        </table>
+                    <div class="card-body" id="offeringsContainer">
+                        <div class="text-center py-3 text-muted" id="offeringsPlaceholder">
+                            Select a placeholder to view offerings
+                        </div>
+                    </div>
+                    <div class="card-footer bg-light">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span><strong>Total Capacity:</strong> <span id="totalCapacity">0</span></span>
+                            <span id="capacityStatus"></span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -632,9 +655,18 @@
 <script>
 $(document).ready(function() {
     const studentCount = {{ student_count|default:0 }};
+    let currentCourseCode = '';
+    let currentCourseIsLab = false;
+    
+    // Faculty list for elective assignment dropdowns
+    const facultyListData = [
+        {% for faculty in faculty_list %}
+        { id: {{ faculty.id }}, name: "{{ faculty.user.full_name|escapejs }}" }{% if not forloop.last %},{% endif %}
+        {% endfor %}
+    ];
     
     // Auto-submit on filter change
-    $('#semesterSelect, #programTypeFilter, #branchFilter, #batchFilter').on('change', function() {
+    $('#semesterSelect, #programTypeFilter, #branchFilter').on('change', function() {
         $('#filterForm').submit();
     });
     
@@ -642,10 +674,75 @@ $(document).ready(function() {
     $('.assign-btn').on('click', function() {
         const code = $(this).data('course');
         const title = $(this).data('title');
-        $('#modalCourseCode').val(code);
+        const courseType = $(this).data('course-type') || '';
+        const practicalHours = $(this).data('practical-hours') || 0;
+        
+        currentCourseCode = code;
+        currentCourseIsLab = (courseType === 'L' || courseType === 'LIT' || parseInt(practicalHours) > 0);
+        
         $('#modalCourseDisplay').val(code + ' - ' + title);
-        $('.batch-checkbox').prop('checked', false);
-        $('#modalFaculty').val('');
+        
+        // Reset all selects
+        $('.batch-faculty-select').val('');
+        $('.batch-lab-assistant').val('');
+        $('#submitAssignBtn').prop('disabled', true);
+        
+        // Show/hide lab assistant section
+        if (currentCourseIsLab) {
+            $('#labAssistantSection').show();
+            $('.lab-assistant-col').show();
+        } else {
+            $('#labAssistantSection').hide();
+            $('.lab-assistant-col').hide();
+        }
+    });
+    
+    // Update submit button when faculty selection changes
+    $(document).on('change', '.batch-faculty-select', function() {
+        updateSubmitButtonState();
+    });
+    
+    function updateSubmitButtonState() {
+        let canSubmit = false;
+        $('.batch-faculty-select').each(function() {
+            if ($(this).val()) {
+                canSubmit = true;
+            }
+        });
+        $('#submitAssignBtn').prop('disabled', !canSubmit);
+    }
+    
+    // Form submission - build hidden inputs dynamically
+    $('#assignForm').on('submit', function(e) {
+        // Remove any previously added hidden inputs
+        $(this).find('.dynamic-input').remove();
+        
+        // Add hidden inputs for each batch with faculty selected
+        let hasAssignment = false;
+        $('.batch-assignment-row').each(function() {
+            const batch = $(this).data('batch');
+            const facultyVal = $(this).find('.batch-faculty-select').val();
+            const labAsstVal = $(this).find('.batch-lab-assistant').val();
+            
+            if (facultyVal) {
+                hasAssignment = true;
+                // Add course_code, batch_label, faculty_id for this assignment
+                const form = $('#assignForm');
+                form.append(`<input type="hidden" class="dynamic-input" name="course_code[]" value="${currentCourseCode}">`);
+                form.append(`<input type="hidden" class="dynamic-input" name="batch_label[]" value="${batch}">`);
+                form.append(`<input type="hidden" class="dynamic-input" name="faculty_id[]" value="${facultyVal}">`);
+                form.append(`<input type="hidden" class="dynamic-input" name="lab_assistant_id[]" value="${labAsstVal || ''}">`);
+            }
+        });
+        
+        // Validate at least one assignment
+        if (!hasAssignment) {
+            e.preventDefault();
+            alert('Please select faculty for at least one section');
+            return false;
+        }
+        
+        return true;
     });
     
     // Manage offerings modal
@@ -661,32 +758,113 @@ $(document).ready(function() {
     });
     
     function loadOfferings(planId) {
-        $.get("{% url 'api_get_elective_offerings' %}", {plan_id: planId}, function(data) {
-            const tbody = $('#offeringsTableBody');
-            tbody.empty();
+        const semesterId = $('#offeringSemesterId').val();
+        const container = $('#offeringsContainer');
+        
+        $.get("{% url 'api_get_elective_offerings' %}", {plan_id: planId, semester_id: semesterId}, function(data) {
+            container.empty();
             
             let totalCap = 0;
             if (data.offerings && data.offerings.length > 0) {
                 data.offerings.forEach(function(o) {
                     const cap = o.batch_count * o.capacity_per_batch;
                     totalCap += cap;
-                    tbody.append(`
-                        <tr data-offering-id="${o.id}">
-                            <td><strong>${o.course_code}</strong></td>
-                            <td>${o.course_title}</td>
-                            <td>${o.batch_count}</td>
-                            <td>${o.capacity_per_batch}</td>
-                            <td><strong>${cap}</strong></td>
-                            <td>
-                                <button type="button" class="btn btn-xs btn-danger delete-offering" data-id="${o.id}">
-                                    <i class="fas fa-times"></i>
+                    
+                    // Build faculty options
+                    let facultyOptions = '<option value="">-- Select Faculty --</option>';
+                    facultyListData.forEach(function(f) {
+                        facultyOptions += `<option value="${f.id}">${f.name}</option>`;
+                    });
+                    
+                    // Build batch assignment rows
+                    let batchRows = '';
+                    for (let i = 1; i <= o.batch_count; i++) {
+                        const assignment = o.assignments[i] || {};
+                        const selectedFaculty = assignment.faculty_id || '';
+                        const selectedLabAsst = assignment.lab_assistant_id || '';
+                        
+                        // Build faculty select with selection
+                        let facultySelect = '<option value="">-- Select Faculty --</option>';
+                        facultyListData.forEach(function(f) {
+                            const selected = (f.id == selectedFaculty) ? 'selected' : '';
+                            facultySelect += `<option value="${f.id}" ${selected}>${f.name}</option>`;
+                        });
+                        
+                        // Build lab assistant select
+                        let labAsstSelect = '<option value="">-- None --</option>';
+                        facultyListData.forEach(function(f) {
+                            const selected = (f.id == selectedLabAsst) ? 'selected' : '';
+                            labAsstSelect += `<option value="${f.id}" ${selected}>${f.name}</option>`;
+                        });
+                        
+                        const labAsstCol = o.needs_lab_assistant ? `
+                            <td style="width:35%">
+                                <select class="form-control form-control-sm elective-lab-asst-select" 
+                                        data-offering="${o.id}" data-batch="${i}">
+                                    ${labAsstSelect}
+                                </select>
+                            </td>` : '<td></td>';
+                        
+                        batchRows += `
+                            <tr data-offering="${o.id}" data-batch="${i}">
+                                <td style="width:15%"><strong>Batch ${i}</strong></td>
+                                <td style="width:35%">
+                                    <select class="form-control form-control-sm elective-faculty-select" 
+                                            data-offering="${o.id}" data-batch="${i}">
+                                        ${facultySelect}
+                                    </select>
+                                </td>
+                                ${labAsstCol}
+                                <td style="width:15%">
+                                    <span class="badge ${assignment.faculty_id ? 'badge-success' : 'badge-warning'}">
+                                        ${assignment.faculty_id ? '<i class="fas fa-check"></i>' : '<i class="fas fa-exclamation"></i>'}
+                                    </span>
+                                </td>
+                            </tr>
+                        `;
+                    }
+                    
+                    const labHeader = o.needs_lab_assistant ? '<th style="width:35%">Lab Assistant</th>' : '<th></th>';
+                    
+                    container.append(`
+                        <div class="card card-outline card-secondary mb-2 offering-card" data-offering-id="${o.id}">
+                            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                                <div>
+                                    <strong>${o.course_code}</strong> - ${o.course_title}
+                                    ${o.needs_lab_assistant ? '<span class="badge badge-info ml-2">L/LIT</span>' : ''}
+                                </div>
+                                <div>
+                                    <span class="badge badge-secondary mr-2">${o.batch_count} batch(es) × ${o.capacity_per_batch} = ${cap}</span>
+                                    <button type="button" class="btn btn-xs btn-danger delete-offering" data-id="${o.id}" title="Remove">
+                                        <i class="fas fa-times"></i>
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="card-body p-2">
+                                <table class="table table-sm table-borderless mb-0">
+                                    <thead>
+                                        <tr class="text-muted">
+                                            <th style="width:15%">Batch</th>
+                                            <th style="width:35%">Faculty</th>
+                                            ${labHeader}
+                                            <th style="width:15%">Status</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        ${batchRows}
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div class="card-footer py-1 text-right">
+                                <button type="button" class="btn btn-xs btn-primary save-offering-assignment" data-offering="${o.id}">
+                                    <i class="fas fa-save"></i> Save Assignment
                                 </button>
-                            </td>
-                        </tr>
+                            </div>
+                        </div>
                     `);
                 });
             } else {
-                tbody.html('<tr><td colspan="6" class="text-center text-muted py-3">No courses offered yet</td></tr>');
+                container.html('<div class="text-center py-3 text-muted">No courses offered yet. Add courses above.</div>');
             }
             
             $('#totalCapacity').text(totalCap);
@@ -780,6 +958,57 @@ $(document).ready(function() {
                 loadOfferings(planId);
             } else {
                 alert(data.error || 'Error adding offering');
+            }
+        });
+    });
+    
+    // Save elective offering faculty assignments
+    $(document).on('click', '.save-offering-assignment', function() {
+        const btn = $(this);
+        const offeringId = btn.data('offering');
+        const card = btn.closest('.offering-card');
+        const planId = $('#offeringPlanId').val();
+        
+        // Collect all batch assignments for this offering
+        const assignments = [];
+        card.find('tr[data-offering="' + offeringId + '"]').each(function() {
+            const batchNum = $(this).data('batch');
+            const facultyId = $(this).find('.elective-faculty-select').val();
+            const labAsstId = $(this).find('.elective-lab-asst-select').val() || null;
+            
+            assignments.push({
+                batch_number: batchNum,
+                faculty_id: facultyId || null,
+                lab_assistant_id: labAsstId
+            });
+        });
+        
+        btn.prop('disabled', true).html('<i class="fas fa-spinner fa-spin"></i> Saving...');
+        
+        $.ajax({
+            url: "{% url 'api_save_elective_offering_assignment' %}",
+            type: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({
+                offering_id: offeringId,
+                assignments: assignments
+            }),
+            headers: {
+                'X-CSRFToken': '{{ csrf_token }}'
+            },
+            success: function(data) {
+                btn.prop('disabled', false).html('<i class="fas fa-save"></i> Save Assignment');
+                if (data.success) {
+                    // Show success and reload
+                    loadOfferings(planId);
+                    toastr.success('Faculty assignment saved successfully');
+                } else {
+                    alert(data.error || 'Error saving assignment');
+                }
+            },
+            error: function() {
+                btn.prop('disabled', false).html('<i class="fas fa-save"></i> Save Assignment');
+                alert('Error saving assignment');
             }
         });
     });

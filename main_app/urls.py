@@ -61,14 +61,8 @@ urlpatterns = [
     path("course/delete/<str:course_code>/", hod_views.delete_course, name='delete_course'),
     
     # Course Assignment Management
-    path("course-assignment/add/", hod_views.add_course_assignment, name='add_course_assignment'),
     path("course-assignment/manage/", hod_views.manage_course_assignment, name='manage_course_assignment'),
     path("course-assignment/delete/<int:assignment_id>/", hod_views.delete_course_assignment, name='delete_course_assignment'),
-    
-    # Backward compatible course allocation URLs
-    path("course-allocation/add/", hod_views.add_course_allocation, name='add_course_allocation'),
-    path("course-allocation/manage/", hod_views.manage_course_allocation, name='manage_course_allocation'),
-    path("course-allocation/delete/<int:allocation_id>/", hod_views.delete_course_allocation, name='delete_course_allocation'),
     
     # Academic Year & Regulation Management
     path("academic-year/add/", hod_views.add_academic_year, name='add_academic_year'),
@@ -112,6 +106,7 @@ urlpatterns = [
     path("api/elective-offerings/", hod_views.api_get_elective_offerings, name='api_get_elective_offerings'),
     path("api/elective-offerings/add/", hod_views.api_add_elective_offering, name='api_add_elective_offering'),
     path("api/elective-offerings/remove/", hod_views.api_remove_elective_offering, name='api_remove_elective_offering'),
+    path("api/elective-offerings/assign-faculty/", hod_views.api_save_elective_offering_assignment, name='api_save_elective_offering_assignment'),
     
     # Semester Course Assignment
     path("semester/course-assignment/", hod_views.semester_course_assignment, name='semester_course_assignment'),
@@ -209,7 +204,7 @@ urlpatterns = [
     
     # Semester Promotion Management (HOD)
     path("promotions/", hod_views.manage_promotions, name='manage_promotions'),
-    path("promotions/bulk/", hod_views.bulk_promote_semester, name='bulk_promote_semester'),
+    # path("promotions/bulk/", hod_views.bulk_promote_semester, name='bulk_promote_semester'),  # TODO: Function not implemented yet
     path("promotions/run-auto/", hod_views.run_auto_promotion, name='run_auto_promotion'),
     path("promotions/manual/", hod_views.manual_promote_students, name='manual_promote_students'),
     path("promotions/schedule/", hod_views.create_promotion_schedule, name='create_promotion_schedule'),

@@ -49,23 +49,10 @@
                                 {% endif %}
                             </div>
 
-                            <div class="row">
-                                <div class="col-md-6">
-                                    <div class="form-group">
-                                        <label for="{{ form.effective_from.id_for_label }}">Effective From</label>
-                                        {{ form.effective_from }}
-                                        {% if form.effective_from.errors %}
-                                            <div class="invalid-feedback d-block">{{ form.effective_from.errors }}</div>
-                                        {% endif %}
-                                    </div>
-                                </div>
-                                <div class="col-md-6">
-                                    <div class="form-group">
-                                        <div class="checkbox-wrapper mt-4 pt-2">
-                                            {{ form.is_active }}
-                                            <label for="{{ form.is_active.id_for_label }}">Active</label>
-                                        </div>
-                                    </div>
+                            <div class="form-group">
+                                <div class="checkbox-wrapper">
+                                    {{ form.is_active }}
+                                    <label for="{{ form.is_active.id_for_label }}">Active</label>
                                 </div>
                             </div>
 

@@ -109,7 +109,7 @@
                         <tr>
                             <td class="day-header">{{ day_name }}</td>
                             {% for slot in time_slots %}
-                            {% with entry_key=day_code|add:"_"|add:slot.slot_number|stringformat:"i" %}
+                            {% with entry_key=day_code|add_str:"_"|add_str:slot.slot_number %}
                             <td class="timetable-cell {% if entry_lookup and entry_key in entry_lookup %}has-entry{% endif %}">
                                 {% if entry_lookup and entry_key in entry_lookup %}
                                     {% with cell_entry=entry_lookup|get_item:entry_key %}

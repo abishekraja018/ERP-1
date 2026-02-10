@@ -7,7 +7,8 @@ from .models import (
     Publication, Student_Achievement, Lab_Issue_Log,
     LeaveRequest, Feedback, Event, EventRegistration,
     Notification, Announcement, ElectiveVertical, ElectiveCourseOffering,
-    ExamSchedule, StructuredQuestionPaper, QPQuestion
+    ExamSchedule, StructuredQuestionPaper, QPQuestion,
+    Program, ProgramBatch, AdmissionBatch
 )
 
 
@@ -57,13 +58,13 @@ class ElectiveVerticalInline(admin.TabularInline):
 
 @admin.register(Regulation)
 class RegulationAdmin(admin.ModelAdmin):
-    list_display = ('year', 'name', 'is_active', 'active_student_count', 'effective_from', 'get_categories', 'get_verticals')
+    list_display = ('year', 'name', 'active_student_count', 'effective_from', 'get_categories', 'get_verticals')
     search_fields = ('year', 'name')
     inlines = [CourseCategoryInline, ElectiveVerticalInline]
     
     def get_categories(self, obj):
         """Display course categories for this regulation"""
-        categories = obj.course_categories.filter(is_active=True).values_list('code', flat=True)
+        categories = obj.course_categories.all().values_list('code', flat=True)
         return ', '.join(categories) if categories else '-'
     get_categories.short_description = 'Course Categories'
     
@@ -132,6 +133,109 @@ class SemesterAdmin(admin.ModelAdmin):
 
 
 # =============================================================================
+# PROGRAM & BATCH ADMINS
+# =============================================================================
+
+@admin.register(Program)
+class ProgramAdmin(admin.ModelAdmin):
+    list_display = ('code', 'full_name', 'degree', 'level', 'regulation', 'duration_years', 'default_batch_count', 'student_count')
+    list_filter = ('level', 'degree', 'regulation')
+    search_fields = ('code', 'name', 'specialization')
+    ordering = ['level', 'name']
+    
+    def full_name(self, obj):
+        return obj.full_name
+    full_name.short_description = 'Program Name'
+
+
+class ProgramBatchInline(admin.TabularInline):
+    """Inline to manage batches within Admission Batch admin"""
+    model = ProgramBatch
+    extra = 0
+    fields = ('year_of_study', 'batch_name', 'batch_display', 'capacity', 'is_active')
+
+
+@admin.register(ProgramBatch)
+class ProgramBatchAdmin(admin.ModelAdmin):
+    list_display = ('academic_year', 'program', 'year_of_study', 'batch_name', 'capacity', 'is_active')
+    list_filter = ('academic_year', 'program', 'year_of_study', 'is_active')
+    search_fields = ('program__code', 'program__name', 'batch_name')
+    ordering = ['-academic_year', 'program', 'year_of_study', 'batch_name']
+
+
+@admin.register(AdmissionBatch)
+class AdmissionBatchAdmin(admin.ModelAdmin):
+    list_display = ('program', 'admission_year', 'regulation', 'batch_labels', 
+                    'batch_count', 'capacity_per_batch', 'total_capacity', 
+                    'lateral_intake_display', 'student_count', 'is_active')
+    list_filter = ('program', 'admission_year', 'regulation', 'is_active')
+    search_fields = ('program__code', 'program__name', 'batch_labels')
+    ordering = ['-admission_year', 'program']
+    readonly_fields = ('batch_count', 'total_capacity', 'total_lateral_capacity', 
+                       'regular_student_count', 'lateral_student_count', 'student_count', 
+                       'expected_graduation_year', 'allows_lateral_entry')
+    
+    fieldsets = (
+        ('Program & Year', {
+            'fields': ('program', 'admission_year', 'regulation')
+        }),
+        ('Batch Configuration', {
+            'fields': ('batch_labels', 'capacity_per_batch', 'is_active'),
+            'description': 'Enter batch labels separated by commas (e.g., A,B,C or N,P,Q). Both regular and lateral students use the same batches.'
+        }),
+        ('Lateral Entry (UG Only)', {
+            'fields': ('lateral_intake_per_batch', 'allows_lateral_entry', 'total_lateral_capacity'),
+            'description': 'Lateral entry students join at 3rd semester and are assigned to existing batches. Only for UG programs.',
+            'classes': ('collapse',)
+        }),
+        ('Statistics (Read-only)', {
+            'fields': ('batch_count', 'total_capacity', 'regular_student_count', 
+                       'lateral_student_count', 'student_count', 'expected_graduation_year'),
+            'classes': ('collapse',)
+        }),
+        ('Notes', {
+            'fields': ('remarks',),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def batch_count(self, obj):
+        return obj.batch_count
+    batch_count.short_description = 'Batches'
+    
+    def total_capacity(self, obj):
+        return obj.total_capacity
+    total_capacity.short_description = 'Regular Capacity'
+    
+    def lateral_intake_display(self, obj):
+        if obj.allows_lateral_entry:
+            return f"{obj.lateral_intake_per_batch}/batch"
+        return '-'
+    lateral_intake_display.short_description = 'Lateral Intake'
+    
+    def total_lateral_capacity(self, obj):
+        return obj.total_lateral_capacity
+    total_lateral_capacity.short_description = 'Total Lateral Capacity'
+    
+    def allows_lateral_entry(self, obj):
+        return obj.allows_lateral_entry
+    allows_lateral_entry.short_description = 'Allows Lateral Entry'
+    allows_lateral_entry.boolean = True
+    
+    def regular_student_count(self, obj):
+        return obj.regular_student_count
+    regular_student_count.short_description = 'Regular Students'
+    
+    def lateral_student_count(self, obj):
+        return obj.lateral_student_count
+    lateral_student_count.short_description = 'Lateral Students'
+    
+    def student_count(self, obj):
+        return obj.student_count
+    student_count.short_description = 'Total Students'
+
+
+# =============================================================================
 # PROFILE ADMINS
 # =============================================================================
 
@@ -153,10 +257,40 @@ class NonTeachingStaffProfileAdmin(admin.ModelAdmin):
 
 @admin.register(Student_Profile)
 class StudentProfileAdmin(admin.ModelAdmin):
-    list_display = ('register_no', 'user', 'branch', 'batch_label', 'current_sem', 'program_type')
-    list_filter = ('branch', 'batch_label', 'current_sem', 'program_type', 'regulation')
+    list_display = ('register_no', 'user', 'branch', 'batch_label', 'current_sem', 'entry_type', 'admission_year', 'status')
+    list_filter = ('branch', 'batch_label', 'current_sem', 'program_type', 'regulation', 'entry_type', 'admission_year', 'status')
     search_fields = ('register_no', 'user__full_name', 'user__email')
-    raw_id_fields = ('user', 'advisor')
+    raw_id_fields = ('user', 'advisor', 'admission_batch')
+    readonly_fields = ('year_of_study_display', 'admission_batch_info')
+    
+    fieldsets = (
+        ('User Account', {
+            'fields': ('user',)
+        }),
+        ('Admission Info', {
+            'fields': ('register_no', 'admission_batch', 'admission_batch_info', 'batch_label', 'entry_type', 'admission_year'),
+            'description': 'Select admission batch to auto-populate branch, regulation, and entry type'
+        }),
+        ('Academic Info', {
+            'fields': ('branch', 'program_type', 'regulation', 'current_sem', 'year_of_study_display', 'status')
+        }),
+        ('Personal Info', {
+            'fields': ('advisor', 'parent_name', 'parent_phone', 'blood_group'),
+            'classes': ('collapse',)
+        }),
+        ('Graduation', {
+            'fields': ('graduation_year',),
+            'classes': ('collapse',)
+        }),
+    )
+    
+    def year_of_study_display(self, obj):
+        return obj.year_of_study_display
+    year_of_study_display.short_description = 'Year of Study'
+    
+    def admission_batch_info(self, obj):
+        return obj.admission_batch_info
+    admission_batch_info.short_description = 'Batch Info'
 
 
 # =============================================================================

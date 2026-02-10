@@ -22,7 +22,7 @@
                     <div class="card-header">
                         <h3 class="card-title">All Course Assignments</h3>
                         <div class="card-tools">
-                            <a href="{% url 'add_course_allocation' %}" class="btn btn-primary btn-sm">
+                            <a href="{% url 'semester_course_assignment' %}" class="btn btn-primary btn-sm">
                                 <i class="fas fa-plus"></i> Add New Assignment
                             </a>
                         </div>
@@ -54,7 +54,7 @@
                                         <td>{{ assignment.academic_year.year }}</td>
                                         <td>Sem {{ assignment.semester.semester_number }}</td>
                                         <td>
-                                            <a href="{% url 'delete_course_allocation' assignment.id %}" 
+                                            <a href="{% url 'delete_course_assignment' assignment.id %}" 
                                                class="btn btn-sm btn-danger" title="Delete"
                                                onclick="return confirm('Are you sure you want to delete this assignment?')">
                                                 <i class="fas fa-trash"></i>
@@ -68,7 +68,7 @@
                         {% else %}
                         <div class="alert alert-info">
                             <i class="fas fa-info-circle"></i> No course assignments found. 
-                            <a href="{% url 'add_course_allocation' %}">Create one now</a>
+                            <a href="{% url 'semester_course_assignment' %}">Create one now</a>
                         </div>
                         {% endif %}
                     </div>

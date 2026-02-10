@@ -6,62 +6,217 @@
 
 <section class="content">
     <div class="container-fluid">
+        
+        <!-- Year of Study Quick Filter Cards -->
+        <div class="row mb-3">
+            <div class="col-12">
+                <div class="btn-group w-100">
+                    <a href="?{% if selected_level %}level={{ selected_level }}&{% endif %}{% if selected_branch %}branch={{ selected_branch }}&{% endif %}{% if selected_batch %}batch={{ selected_batch }}{% endif %}" 
+                       class="btn {% if not selected_year %}btn-primary{% else %}btn-outline-primary{% endif %}" style="flex: 1;">
+                        <i class="fas fa-users mr-1"></i> All Years
+                        <span class="badge {% if not selected_year %}badge-light{% else %}badge-primary{% endif %} ml-1">{{ total_all_years }}</span>
+                    </a>
+                    <a href="?year=1{% if selected_level %}&level={{ selected_level }}{% endif %}{% if selected_branch %}&branch={{ selected_branch }}{% endif %}{% if selected_batch %}&batch={{ selected_batch }}{% endif %}" 
+                       class="btn {% if selected_year == '1' %}btn-info{% else %}btn-outline-info{% endif %}" style="flex: 1;">
+                        <i class="fas fa-seedling mr-1"></i> 1st Year
+                        <span class="badge {% if selected_year == '1' %}badge-light{% else %}badge-info{% endif %} ml-1">{{ year_counts.1 }}</span>
+                    </a>
+                    <a href="?year=2{% if selected_level %}&level={{ selected_level }}{% endif %}{% if selected_branch %}&branch={{ selected_branch }}{% endif %}{% if selected_batch %}&batch={{ selected_batch }}{% endif %}" 
+                       class="btn {% if selected_year == '2' %}btn-success{% else %}btn-outline-success{% endif %}" style="flex: 1;">
+                        <i class="fas fa-leaf mr-1"></i> 2nd Year
+                        <span class="badge {% if selected_year == '2' %}badge-light{% else %}badge-success{% endif %} ml-1">{{ year_counts.2 }}</span>
+                    </a>
+                    <a href="?year=3{% if selected_level %}&level={{ selected_level }}{% endif %}{% if selected_branch %}&branch={{ selected_branch }}{% endif %}{% if selected_batch %}&batch={{ selected_batch }}{% endif %}" 
+                       class="btn {% if selected_year == '3' %}btn-warning{% else %}btn-outline-warning{% endif %}" style="flex: 1;">
+                        <i class="fas fa-tree mr-1"></i> 3rd Year
+                        <span class="badge {% if selected_year == '3' %}badge-light{% else %}badge-warning{% endif %} ml-1">{{ year_counts.3 }}</span>
+                    </a>
+                    <a href="?year=4{% if selected_level %}&level={{ selected_level }}{% endif %}{% if selected_branch %}&branch={{ selected_branch }}{% endif %}{% if selected_batch %}&batch={{ selected_batch }}{% endif %}" 
+                       class="btn {% if selected_year == '4' %}btn-danger{% else %}btn-outline-danger{% endif %}" style="flex: 1;">
+                        <i class="fas fa-graduation-cap mr-1"></i> 4th Year
+                        <span class="badge {% if selected_year == '4' %}badge-light{% else %}badge-danger{% endif %} ml-1">{{ year_counts.4 }}</span>
+                    </a>
+                </div>
+            </div>
+        </div>
+        
         <div class="row">
             <div class="col-md-12">
-                <div class="card">
+                <div class="card card-outline card-primary">
                     <div class="card-header">
-                        <h3 class="card-title">{{page_title}}</h3>
+                        <h3 class="card-title">
+                            <i class="fas fa-user-graduate mr-2"></i>{{page_title}}
+                            <span class="badge badge-primary ml-2">{{ total_students }} students</span>
+                        </h3>
+                        
+                        <!-- Filters -->
+                        <div class="card-tools">
+                            <form method="GET" class="form-inline" id="filterForm">
+                                {% if selected_year %}
+                                <input type="hidden" name="year" value="{{ selected_year }}">
+                                {% endif %}
+                                
+                                <select name="level" class="form-control form-control-sm mr-2" onchange="document.getElementById('filterForm').submit()">
+                                    <option value="">All (UG & PG)</option>
+                                    <option value="UG" {% if selected_level == 'UG' %}selected{% endif %}>UG Only</option>
+                                    <option value="PG" {% if selected_level == 'PG' %}selected{% endif %}>PG Only</option>
+                                </select>
+                                
+                                <select name="branch" class="form-control form-control-sm mr-2" onchange="document.getElementById('filterForm').submit()">
+                                    <option value="">All Branches</option>
+                                    {% for branch in branch_choices %}
+                                    <option value="{{ branch.code }}" {% if selected_branch == branch.code %}selected{% endif %}>
+                                        {{ branch.code }} - {{ branch.name }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                
+                                <select name="batch" class="form-control form-control-sm mr-2" onchange="document.getElementById('filterForm').submit()">
+                                    <option value="">All Sections</option>
+                                    {% for batch_name in batch_choices %}
+                                    <option value="{{ batch_name }}" {% if selected_batch == batch_name %}selected{% endif %}>
+                                        Section {{ batch_name }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                
+                                {% if selected_branch or selected_batch or selected_year or selected_level %}
+                                <a href="{% url 'manage_student' %}" class="btn btn-sm btn-outline-secondary" title="Clear Filters">
+                                    <i class="fas fa-times"></i>
+                                </a>
+                                {% endif %}
+                            </form>
+                        </div>
                     </div>
                     <!-- /.card-header -->
-                    <div class="card-body">
-                        <table id="example2" class="table table-bordered table-hover">
+                    <div class="card-body table-responsive p-0">
+                        <table id="studentsTable" class="table table-hover table-striped">
                             <thead class="thead-dark">
                                 <tr>
-                                    <th>#</th>
+                                    <th style="width: 50px">#</th>
                                     <th>Register No</th>
-                                    <th>Full Name</th>
+                                    <th>Student Name</th>
                                     <th>Email</th>
                                     <th>Branch</th>
                                     <th>Section</th>
-                                    <th>Semester</th>
-                                    <th>Avatar</th>
-                                    <th>Actions</th>
+                                    <th>Year / Sem</th>
+                                    <th style="width: 60px">Photo</th>
+                                    <th style="width: 120px">Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {% for student in students %}
                                 <tr>
                                     <td>{{ forloop.counter }}</td>
-                                    <td>{{student.register_no}}</td>
-                                    <td>{{student.user.full_name}}</td>
-                                    <td>{{student.user.email}}</td>
-                                    <td>{{student.branch}}</td>
-                                    <td>{{student.batch_display}}</td>
-                                    <td>{{student.current_sem}}</td>
+                                    <td><strong>{{ student.register_no }}</strong></td>
                                     <td>
+                                        {{ student.user.full_name }}
+                                        {% if student.entry_type == 'LATERAL' %}
+                                        <span class="badge badge-info badge-sm" title="Lateral Entry">LE</span>
+                                        {% endif %}
+                                    </td>
+                                    <td><small>{{ student.user.email }}</small></td>
+                                    <td>
+                                        <span class="badge badge-secondary">{{ student.branch }}</span>
+                                    </td>
+                                    <td>
+                                        <span class="badge badge-primary">{{ student.batch_label }}</span>
+                                    </td>
+                                    <td>
+                                        <span class="badge 
+                                            {% if student.year_of_study == 1 %}badge-info
+                                            {% elif student.year_of_study == 2 %}badge-success
+                                            {% elif student.year_of_study == 3 %}badge-warning
+                                            {% else %}badge-danger{% endif %}">
+                                            {{ student.year_of_study_display }}
+                                        </span>
+                                        <small class="text-muted">(Sem {{ student.current_sem }})</small>
+                                    </td>
+                                    <td class="text-center">
                                         {% if student.user.profile_pic %}
-                                        <img class="img img-fluid mb-2" height="40" width="40"
-                                            src="{{student.user.profile_pic.url}}" alt="">
+                                        <img class="img-circle elevation-1" height="35" width="35"
+                                            src="{{ student.user.profile_pic.url }}" alt="{{ student.user.full_name }}">
                                         {% else %}
-                                        <i class="fas fa-user-circle fa-2x"></i>
+                                        <span class="img-circle bg-secondary text-white d-inline-flex align-items-center justify-content-center" 
+                                              style="width: 35px; height: 35px; font-size: 14px;">
+                                            {{ student.user.full_name|slice:":1" }}
+                                        </span>
                                         {% endif %}
                                     </td>
                                     <td>
-                                        <a href="{% url 'edit_student' student.id %}" class="btn btn-info btn-sm">Edit</a>
-                                        <a href="{% url 'delete_student' student.id %}" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure?')">Delete</a>
+                                        <div class="btn-group btn-group-sm">
+                                            <a href="{% url 'edit_student' student.id %}" class="btn btn-info" title="Edit">
+                                                <i class="fas fa-edit"></i>
+                                            </a>
+                                            <a href="{% url 'delete_student' student.id %}" class="btn btn-danger" 
+                                               onclick="return confirm('Are you sure you want to delete {{ student.user.full_name }}?')" title="Delete">
+                                                <i class="fas fa-trash"></i>
+                                            </a>
+                                        </div>
                                     </td>
                                 </tr>
                                 {% empty %}
                                 <tr>
-                                    <td colspan="9" class="text-center">No students found. <a href="{% url 'add_student' %}">Add one</a></td>
+                                    <td colspan="9" class="text-center py-4">
+                                        <i class="fas fa-inbox fa-3x text-muted mb-3"></i>
+                                        <p class="text-muted mb-2">No students found matching your filters.</p>
+                                        <a href="{% url 'add_student' %}" class="btn btn-primary btn-sm">
+                                            <i class="fas fa-plus mr-1"></i> Add Student
+                                        </a>
+                                        <a href="{% url 'bulk_upload_students' %}" class="btn btn-success btn-sm">
+                                            <i class="fas fa-upload mr-1"></i> Bulk Upload
+                                        </a>
+                                    </td>
                                 </tr>
                                 {% endfor %}
                             </tbody>
                         </table>
                     </div>
+                    <!-- /.card-body -->
+                    
+                    {% if students %}
+                    <div class="card-footer clearfix">
+                        <div class="float-left">
+                            <small class="text-muted">Showing {{ total_students }} active student(s)</small>
+                        </div>
+                        <div class="float-right">
+                            <a href="{% url 'add_student' %}" class="btn btn-primary btn-sm">
+                                <i class="fas fa-plus mr-1"></i> Add Student
+                            </a>
+                            <a href="{% url 'bulk_upload_students' %}" class="btn btn-success btn-sm">
+                                <i class="fas fa-upload mr-1"></i> Bulk Upload
+                            </a>
+                        </div>
+                    </div>
+                    {% endif %}
                 </div>
             </div>
         </div>
     </div>
 </section>
 {% endblock content %}
+
+{% block custom_js %}
+<script>
+$(document).ready(function() {
+    // Initialize DataTable for search and sorting
+    $('#studentsTable').DataTable({
+        "paging": true,
+        "lengthChange": true,
+        "searching": true,
+        "ordering": true,
+        "info": true,
+        "autoWidth": false,
+        "responsive": true,
+        "pageLength": 25,
+        "lengthMenu": [[10, 25, 50, 100, -1], [10, 25, 50, 100, "All"]],
+        "order": [[1, "asc"]], // Order by register number
+        "language": {
+            "search": "<i class='fas fa-search'></i>",
+            "searchPlaceholder": "Search students..."
+        },
+        "dom": '<"row"<"col-sm-6"l><"col-sm-6"f>>rtip'
+    });
+});
+</script>
+{% endblock custom_js %}
