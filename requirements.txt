@@ -11,3 +11,4 @@ python-docx
 htmldocx
 beautifulsoup4
 google-generativeai
+psycopg2-binary
