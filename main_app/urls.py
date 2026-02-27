@@ -202,6 +202,21 @@ urlpatterns = [
     path("timetable/get-courses/", hod_views.get_courses_for_semester, name='get_courses_for_semester'),
     path("timetable/get-faculty/", hod_views.get_all_faculty, name='get_all_faculty'),
     
+    # Timetable Wizard 
+    path("timetable/wizard/", hod_views.create_timetable_wizard, name='create_timetable_wizard'),
+    path("api/timetable/batches/", hod_views.api_get_batches_for_program, name='api_timetable_batches'),
+    path("api/timetable/courses/", hod_views.api_get_courses_for_program_year, name='api_timetable_courses'),
+    path("api/timetable/reservation/save/", hod_views.api_save_reservation, name='api_save_reservation'),
+    path("api/timetable/reservation/delete/", hod_views.api_delete_reservation, name='api_delete_reservation'),
+    path("api/timetable/reservations/", hod_views.api_get_reservations, name='api_get_reservations'),
+    path("api/timetable/lab-config/", hod_views.api_save_lab_config, name='api_save_lab_config'),
+    path("api/timetable/generate/", hod_views.generate_timetables_from_config, name='generate_timetables_from_config'),
+    path("api/timetable/preview/", hod_views.api_preview_generation, name='api_preview_generation'),
+    path("api/timetable/labs-for-config/", hod_views.api_get_labs_for_config, name='api_get_labs_for_config'),
+    path("api/timetable/program-year-status/", hod_views.api_get_all_program_year_status, name='api_program_year_status'),
+    path("api/timetable/delete/", hod_views.api_delete_timetables, name='api_delete_timetables'),
+    path("api/timetable/generate-all/", hod_views.api_generate_all_timetables, name='api_generate_all_timetables'),
+    
     # Semester Promotion Management (HOD)
     path("promotions/", hod_views.manage_promotions, name='manage_promotions'),
     # path("promotions/bulk/", hod_views.bulk_promote_semester, name='bulk_promote_semester'),  # TODO: Function not implemented yet

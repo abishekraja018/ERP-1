@@ -2439,7 +2439,13 @@ class TimetableEntry(models.Model):
     is_lab = models.BooleanField(default=False, help_text="Mark if this is a lab session spanning multiple slots")
     lab_end_slot = models.ForeignKey(TimeSlot, on_delete=models.SET_NULL, null=True, blank=True,
                                       related_name='lab_end_entries')
+    lab_room = models.ForeignKey('LabRoom', on_delete=models.SET_NULL, null=True, blank=True,
+                                  related_name='timetable_entries',
+                                  help_text="Physical lab room assigned for lab sessions")
     special_note = models.CharField(max_length=100, blank=True, null=True)
+    is_blocked = models.BooleanField(default=False, help_text="Slot intentionally left empty (free period, library, etc.)")
+    block_reason = models.CharField(max_length=100, blank=True, null=True,
+                                     help_text="Reason for blocking: Free Period, Library Hour, Sports, etc.")
     
     class Meta:
         unique_together = ('timetable', 'day', 'time_slot')
@@ -2450,6 +2456,150 @@ class TimetableEntry(models.Model):
     def __str__(self):
         course_info = self.course.course_code if self.course else self.special_note or 'Free'
         return f"{self.timetable} - {self.day} Period {self.time_slot.slot_number}: {course_info}"
+
+
+# =============================================================================
+# TIMETABLE CONFIGURATION (Wizard Models)
+# =============================================================================
+
+class LabRoom(models.Model):
+    """Physical lab rooms available for scheduling."""
+    
+    name = models.CharField(max_length=100, help_text="e.g., CASE Tools Lab, Programming Lab")
+    room_code = models.CharField(max_length=20, unique=True, help_text="e.g., LAB-01, LAB-02")
+    capacity = models.IntegerField(default=60, validators=[MinValueValidator(1)])
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        ordering = ['room_code']
+        verbose_name = 'Lab Room'
+        verbose_name_plural = 'Lab Rooms'
+    
+    def __str__(self):
+        return f"{self.room_code} - {self.name}"
+
+
+class LabRestriction(models.Model):
+    """
+    Restrict a lab room to specific program/year students.
+    If no restrictions exist for a lab, it is available to all programs/years.
+    
+    Examples:
+    - Lab 4 restricted to M.E. CSE-BDA (all years) → program=CSE-BDA, year_of_study=None
+    - Lab 5 restricted to any 1st year → program=None, year_of_study=1
+    - Lab 3 available to all → no LabRestriction rows for Lab 3
+    """
+    
+    lab = models.ForeignKey(LabRoom, on_delete=models.CASCADE, related_name='restrictions')
+    program = models.ForeignKey(Program, on_delete=models.CASCADE, null=True, blank=True,
+                                 help_text="Restrict to this program (null = any program)")
+    year_of_study = models.IntegerField(null=True, blank=True, 
+                                         validators=[MinValueValidator(1), MaxValueValidator(6)],
+                                         help_text="Restrict to this year (null = all years)")
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, null=True, blank=True,
+                                help_text="Reserve this lab for a specific course (null = no course restriction)")
+    
+    class Meta:
+        unique_together = ('lab', 'program', 'year_of_study', 'course')
+        ordering = ['lab', 'program', 'year_of_study']
+        verbose_name = 'Lab Restriction'
+        verbose_name_plural = 'Lab Restrictions'
+    
+    def __str__(self):
+        parts = [str(self.lab)]
+        if self.program:
+            parts.append(f"Program: {self.program.code}")
+        if self.year_of_study:
+            parts.append(f"Year {self.year_of_study}")
+        return " | ".join(parts)
+
+
+class TimetableConfig(models.Model):
+    """
+    Configuration for a timetable generation session.
+    Groups together all the settings (lab config, fixed slots) for one run of the wizard.
+    """
+    
+    academic_year = models.ForeignKey(AcademicYear, on_delete=models.CASCADE, related_name='timetable_configs')
+    semester = models.ForeignKey(Semester, on_delete=models.CASCADE, related_name='timetable_configs')
+    program = models.ForeignKey(Program, on_delete=models.CASCADE, related_name='timetable_configs')
+    year_of_study = models.IntegerField(validators=[MinValueValidator(1), MaxValueValidator(6)])
+    created_by = models.ForeignKey(Account_User, on_delete=models.SET_NULL, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_generated = models.BooleanField(default=False, help_text="True once timetables have been generated from this config")
+    
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Timetable Config'
+        verbose_name_plural = 'Timetable Configs'
+    
+    def __str__(self):
+        return f"{self.academic_year} Sem {self.semester.semester_number} - {self.program.code} Year {self.year_of_study}"
+
+
+class FixedSlotReservation(models.Model):
+    """
+    Pre-reserved (pinned) slots before timetable generation.
+    Allows HOD to fix certain subjects at specific day+period before auto-generation.
+    
+    Example: 
+    - Fix OE for 3rd year CSE at Wednesday Period 4 for all batches
+    - Fix PEC-I for Batch N at Monday Period 5
+    """
+    
+    DAY_CHOICES = [
+        ('MON', 'Monday'),
+        ('TUE', 'Tuesday'),
+        ('WED', 'Wednesday'),
+        ('THU', 'Thursday'),
+        ('FRI', 'Friday'),
+    ]
+    
+    config = models.ForeignKey(TimetableConfig, on_delete=models.CASCADE, related_name='reservations')
+    batch = models.ForeignKey(ProgramBatch, on_delete=models.CASCADE, related_name='slot_reservations')
+    day = models.CharField(max_length=3, choices=DAY_CHOICES)
+    time_slot = models.ForeignKey(TimeSlot, on_delete=models.CASCADE)
+    course = models.ForeignKey(Course, on_delete=models.CASCADE, null=True, blank=True,
+                                help_text="Course to schedule (null when is_blocked=True)")
+    faculty = models.ForeignKey(Faculty_Profile, on_delete=models.SET_NULL, null=True, blank=True)
+    special_note = models.CharField(max_length=100, blank=True, null=True)
+    apply_to_all_batches = models.BooleanField(default=False, 
+                                                help_text="If True, this same course+slot applies to all batches of this program+year")
+    is_blocked = models.BooleanField(default=False,
+                                      help_text="Mark slot as intentionally empty — no course can be auto-scheduled here")
+    block_reason = models.CharField(max_length=100, blank=True, null=True,
+                                     help_text="e.g. Free Period, Library Hour, Sports, Open Elective")
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = ('config', 'batch', 'day', 'time_slot')
+        ordering = ['batch', 'day', 'time_slot']
+        verbose_name = 'Fixed Slot Reservation'
+        verbose_name_plural = 'Fixed Slot Reservations'
+    
+    def __str__(self):
+        if self.is_blocked:
+            return f"{self.batch} - {self.day} P{self.time_slot.slot_number}: [BLOCKED] {self.block_reason or ''}"
+        course_code = self.course.course_code if self.course else '???'
+        return f"{self.batch} - {self.day} P{self.time_slot.slot_number}: {course_code}"
+
+
+class TimetableConfigLab(models.Model):
+    """Junction table: which labs are selected for a specific timetable generation run."""
+    
+    config = models.ForeignKey(TimetableConfig, on_delete=models.CASCADE, related_name='selected_labs')
+    lab = models.ForeignKey(LabRoom, on_delete=models.CASCADE, related_name='config_selections')
+    
+    class Meta:
+        unique_together = ('config', 'lab')
+        ordering = ['lab__room_code']
+        verbose_name = 'Timetable Config Lab Selection'
+        verbose_name_plural = 'Timetable Config Lab Selections'
+    
+    def __str__(self):
+        return f"{self.config} → {self.lab}"
 
 
 # =============================================================================

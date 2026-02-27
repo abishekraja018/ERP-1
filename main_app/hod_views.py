@@ -41,7 +41,8 @@ from .models import (
     Event, EventRegistration, Notification, Announcement, QuestionPaperAssignment,
     Timetable, TimetableEntry, TimeSlot, Program, ExamSchedule, StructuredQuestionPaper,
     RegulationCoursePlan, SemesterPromotion, ProgramRegulation,
-    ProgramBatch, ElectiveVertical, ElectiveCourseOffering
+    ProgramBatch, ElectiveVertical, ElectiveCourseOffering,
+    LabRoom, LabRestriction, TimetableConfig, FixedSlotReservation, TimetableConfigLab
 )
 from .utils.web_scrapper import fetch_acoe_updates
 from .utils.cir_scrapper import fetch_cir_ticker_announcements
@@ -3239,29 +3240,11 @@ def manage_timetables(request):
 
 @login_required
 def add_timetable(request):
-    """Create a new timetable"""
+    """Redirect to the Create Timetable Wizard"""
     if not check_hod_permission(request.user):
         messages.error(request, "Access Denied. HOD privileges required.")
         return redirect('/')
-    
-    if request.method == 'POST':
-        form = TimetableForm(request.POST)
-        if form.is_valid():
-            timetable = form.save(commit=False)
-            timetable.created_by = request.user
-            timetable.save()
-            messages.success(request, f"Timetable created successfully for Year {timetable.year} - Batch {timetable.batch}")
-            return redirect('edit_timetable', timetable_id=timetable.id)
-        else:
-            messages.error(request, "Error creating timetable. Please check the form.")
-    else:
-        form = TimetableForm()
-    
-    context = {
-        'form': form,
-        'page_title': 'Create New Timetable'
-    }
-    return render(request, 'hod_template/add_timetable.html', context)
+    return redirect('create_timetable_wizard')
 
 
 @login_required
@@ -4679,3 +4662,859 @@ def cancel_exam_schedule(request, schedule_id):
         return redirect('manage_exam_schedules')
     
     return redirect('view_exam_schedule_detail', schedule_id=schedule_id)
+
+
+
+# =============================================================================
+# TIMETABLE CREATION WIZARD
+# =============================================================================
+
+@login_required
+def create_timetable_wizard(request):
+    """Main wizard page for creating timetables (3-step process)"""
+    if not check_hod_permission(request.user):
+        return redirect('/')
+    
+    current_year = AcademicYear.get_current()
+    current_semester = Semester.get_current()
+    programs = Program.objects.all().order_by('level', 'code')
+    labs = LabRoom.objects.filter(is_active=True).prefetch_related(
+        'restrictions', 'restrictions__program', 'restrictions__course'
+    )
+    time_slots = TimeSlot.objects.all().order_by('slot_number')
+    # All lab courses for restriction dropdown (global, not per-program)
+    # Note: Course PK is course_code, not id
+    all_lab_courses = list(Course.objects.filter(
+        course_type__in=['L', 'LIT']
+    ).order_by('course_code').values('course_code', 'title'))
+    
+    context = {
+        'page_title': 'Create Timetable - Wizard',
+        'current_year': current_year,
+        'current_semester': current_semester,
+        'programs': programs,
+        'labs': labs,
+        'time_slots': time_slots,
+        'days': TimetableEntry.DAY_CHOICES,
+        'year_choices': [(1, '1st Year'), (2, '2nd Year'), (3, '3rd Year'), (4, '4th Year')],
+        'all_lab_courses_json': json.dumps(all_lab_courses),
+    }
+    return render(request, 'hod_template/create_timetable_wizard.html', context)
+
+
+@login_required
+def api_get_batches_for_program(request):
+    """AJAX: Given program_id + year_of_study, return available batches"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    program_id = request.GET.get('program_id')
+    year_of_study = request.GET.get('year_of_study')
+    
+    if not program_id or not year_of_study:
+        return JsonResponse({'error': 'program_id and year_of_study required'}, status=400)
+    
+    current_year = AcademicYear.get_current()
+    if not current_year:
+        return JsonResponse({'error': 'No active academic year found'}, status=400)
+    
+    batches = ProgramBatch.objects.filter(
+        academic_year=current_year,
+        program_id=program_id,
+        year_of_study=year_of_study,
+        is_active=True
+    ).order_by('batch_name')
+    
+    data = [{
+        'id': b.id,
+        'batch_name': b.batch_name,
+        'batch_display': b.batch_display or b.batch_name,
+        'capacity': b.capacity,
+    } for b in batches]
+    
+    # Also get semester info
+    try:
+        year_int = int(year_of_study)
+        # Year 1 -> Sems 1,2; Year 2 -> Sems 3,4; etc.
+        sem_start = (year_int - 1) * 2 + 1
+        sem_end = year_int * 2
+        semesters = Semester.objects.filter(
+            academic_year=current_year,
+            semester_number__gte=sem_start,
+            semester_number__lte=sem_end
+        ).order_by('semester_number')
+        semester_data = [{
+            'id': s.id,
+            'semester_number': s.semester_number,
+            'semester_type': s.semester_type,
+        } for s in semesters]
+    except Exception:
+        semester_data = []
+    
+    return JsonResponse({
+        'batches': data,
+        'semesters': semester_data,
+        'academic_year': str(current_year) if current_year else '',
+        'academic_year_id': current_year.id if current_year else None,
+    })
+
+
+@login_required
+def api_get_courses_for_program_year(request):
+    """AJAX: Given program_id + year_of_study, return courses from Course_Assignment"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    program_id = request.GET.get('program_id')
+    year_of_study = request.GET.get('year_of_study')
+    
+    if not program_id or not year_of_study:
+        return JsonResponse({'error': 'program_id and year_of_study required'}, status=400)
+    
+    current_year = AcademicYear.get_current()
+    if not current_year:
+        return JsonResponse({'error': 'No active academic year found'}, status=400)
+    
+    # Get active course assignments for this program+year's batches
+    batches = ProgramBatch.objects.filter(
+        academic_year=current_year,
+        program_id=program_id,
+        year_of_study=year_of_study,
+        is_active=True
+    )
+    
+    assignments = Course_Assignment.objects.filter(
+        academic_year=current_year,
+        batch__in=batches,
+        is_active=True
+    ).select_related('course', 'faculty', 'faculty__user', 'batch')
+    
+    # Also get assignments by batch_label fallback
+    batch_names = list(batches.values_list('batch_name', flat=True))
+    legacy_assignments = Course_Assignment.objects.filter(
+        academic_year=current_year,
+        batch_label__in=batch_names,
+        batch__isnull=True,
+        is_active=True
+    ).select_related('course', 'faculty', 'faculty__user')
+    
+    # Combine and deduplicate
+    all_assignments = list(assignments) + list(legacy_assignments)
+    
+    # Build unique course list
+    courses_seen = set()
+    courses_data = []
+    assignments_data = []
+    
+    for a in all_assignments:
+        if a.course.course_code not in courses_seen:
+            courses_seen.add(a.course.course_code)
+            courses_data.append({
+                'course_code': a.course.course_code,
+                'title': a.course.title,
+                'course_type': a.course.course_type,
+                'credits': a.course.credits,
+                'is_lab': a.course.course_type in ['L', 'LIT'],
+                'ltp': a.course.ltp_display,
+            })
+        
+        assignments_data.append({
+            'id': a.id,
+            'course_code': a.course.course_code,
+            'course_title': a.course.title,
+            'faculty_id': a.faculty.id,
+            'faculty_name': a.faculty.user.full_name,
+            'batch_name': a.batch.batch_name if a.batch else a.batch_label,
+            'batch_id': a.batch.id if a.batch else None,
+        })
+    
+    return JsonResponse({
+        'courses': courses_data,
+        'assignments': assignments_data,
+    })
+
+
+@login_required
+@csrf_exempt
+def api_save_reservation(request):
+    """AJAX: Save or update a FixedSlotReservation"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        config_id = data.get('config_id')
+        batch_id = data['batch_id']
+        day = data['day']
+        slot_number = data['slot_number']
+        is_blocked = data.get('is_blocked', False)
+        block_reason = data.get('block_reason', '')
+        course_code = data.get('course_code')
+        faculty_id = data.get('faculty_id')
+        special_note = data.get('special_note', '')
+        apply_to_all = data.get('apply_to_all_batches', False)
+        
+        time_slot = get_object_or_404(TimeSlot, slot_number=slot_number)
+        batch = get_object_or_404(ProgramBatch, id=batch_id)
+        
+        # For blocked slots, course is optional
+        course = None
+        faculty = None
+        if not is_blocked:
+            if not course_code:
+                return JsonResponse({'error': 'course_code required for non-blocked slots'}, status=400)
+            course = get_object_or_404(Course, course_code=course_code)
+            faculty = Faculty_Profile.objects.filter(id=faculty_id).first() if faculty_id else None
+        
+        # Get or create config
+        if config_id:
+            config = get_object_or_404(TimetableConfig, id=config_id)
+        else:
+            # Create new config
+            academic_year_id = data.get('academic_year_id')
+            semester_id = data.get('semester_id')
+            program_id = data.get('program_id')
+            year_of_study = data.get('year_of_study')
+            
+            config, _ = TimetableConfig.objects.get_or_create(
+                academic_year_id=academic_year_id,
+                semester_id=semester_id,
+                program_id=program_id,
+                year_of_study=year_of_study,
+                is_generated=False,
+                defaults={'created_by': request.user}
+            )
+        
+        reservations_created = []
+        
+        if apply_to_all:
+            # Apply COURSE to all batches, but look up each batch's own assigned faculty
+            all_batches = ProgramBatch.objects.filter(
+                academic_year=config.academic_year,
+                program=config.program,
+                year_of_study=config.year_of_study,
+                is_active=True
+            )
+            for b in all_batches:
+                batch_faculty = faculty  # default to the selected faculty
+                batch_faculty_name = faculty.user.full_name if faculty else ''
+                
+                if not is_blocked and course:
+                    # Look up this batch's assigned faculty for this course
+                    # Don't filter by semester — config semester may differ from assignment semester
+                    assignment = Course_Assignment.objects.filter(
+                        course=course,
+                        batch=b,
+                        academic_year=config.academic_year,
+                        is_active=True,
+                    ).select_related('faculty__user').first()
+                    if assignment:
+                        batch_faculty = assignment.faculty
+                        batch_faculty_name = assignment.faculty.user.full_name
+                
+                defaults = {
+                    'course': course,
+                    'faculty': batch_faculty,
+                    'special_note': special_note or None,
+                    'apply_to_all_batches': True,
+                    'is_blocked': is_blocked,
+                    'block_reason': block_reason or None,
+                }
+                res, _ = FixedSlotReservation.objects.update_or_create(
+                    config=config,
+                    batch=b,
+                    day=day,
+                    time_slot=time_slot,
+                    defaults=defaults,
+                )
+                reservations_created.append({
+                    'id': res.id,
+                    'batch_id': b.id,
+                    'batch_name': b.batch_name,
+                    'faculty_id': batch_faculty.id if batch_faculty else None,
+                    'faculty_name': batch_faculty_name,
+                })
+        else:
+            defaults = {
+                'course': course,
+                'faculty': faculty,
+                'special_note': special_note or None,
+                'apply_to_all_batches': False,
+                'is_blocked': is_blocked,
+                'block_reason': block_reason or None,
+            }
+            res, _ = FixedSlotReservation.objects.update_or_create(
+                config=config,
+                batch=batch,
+                day=day,
+                time_slot=time_slot,
+                defaults=defaults,
+            )
+            reservations_created.append({
+                'id': res.id,
+                'batch_id': batch.id,
+                'batch_name': batch.batch_name,
+                'faculty_id': faculty.id if faculty else None,
+                'faculty_name': faculty.user.full_name if faculty else '',
+            })
+        
+        return JsonResponse({
+            'success': True,
+            'config_id': config.id,
+            'reservations': reservations_created,
+            'course_code': course.course_code if course else '',
+            'is_blocked': is_blocked,
+            'block_reason': block_reason,
+        })
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=400)
+
+
+@login_required
+@csrf_exempt
+def api_delete_reservation(request):
+    """AJAX: Delete a FixedSlotReservation"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        config_id = data['config_id']
+        batch_id = data['batch_id']
+        day = data['day']
+        slot_number = data['slot_number']
+        
+        time_slot = get_object_or_404(TimeSlot, slot_number=slot_number)
+        
+        # Check if this was an "apply to all" reservation
+        reservation = FixedSlotReservation.objects.filter(
+            config_id=config_id,
+            batch_id=batch_id,
+            day=day,
+            time_slot=time_slot
+        ).first()
+        
+        deleted_batches = []
+        if reservation and reservation.apply_to_all_batches:
+            # Delete from all batches
+            all_deletions = FixedSlotReservation.objects.filter(
+                config_id=config_id,
+                day=day,
+                time_slot=time_slot,
+                apply_to_all_batches=True
+            )
+            for d in all_deletions:
+                deleted_batches.append(d.batch_id)
+            all_deletions.delete()
+        elif reservation:
+            deleted_batches.append(reservation.batch_id)
+            reservation.delete()
+        
+        return JsonResponse({'success': True, 'deleted_batches': deleted_batches})
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=400)
+
+
+@login_required
+def api_get_reservations(request):
+    """AJAX: Get all reservations for a config"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    config_id = request.GET.get('config_id')
+    if not config_id:
+        return JsonResponse({'reservations': []})
+    
+    reservations = FixedSlotReservation.objects.filter(
+        config_id=config_id
+    ).select_related('batch', 'course', 'faculty', 'faculty__user', 'time_slot')
+    
+    data = [{
+        'id': r.id,
+        'batch_id': r.batch.id,
+        'batch_name': r.batch.batch_name,
+        'day': r.day,
+        'slot_number': r.time_slot.slot_number,
+        'course_code': r.course.course_code if r.course else '',
+        'course_title': r.course.title if r.course else '',
+        'faculty_id': r.faculty.id if r.faculty else None,
+        'faculty_name': r.faculty.user.full_name if r.faculty else '',
+        'special_note': r.special_note or '',
+        'apply_to_all_batches': r.apply_to_all_batches,
+        'is_blocked': r.is_blocked,
+        'block_reason': r.block_reason or '',
+    } for r in reservations]
+    
+    return JsonResponse({'reservations': data})
+
+
+@login_required
+@csrf_exempt
+def api_save_lab_config(request):
+    """AJAX: Save lab room and restriction configuration (full sync)"""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        labs_data = data.get('labs', [])
+        config_id = data.get('config_id')
+        selected_lab_ids = data.get('selected_lab_ids', [])
+        
+        # Track which existing lab IDs are still present
+        kept_lab_ids = set()
+        
+        for lab_data in labs_data:
+            lab_id = lab_data.get('id')
+            room_code = str(lab_data.get('room_code', '')).strip()
+            lab_name = str(lab_data.get('name', '')).strip()
+            capacity = int(lab_data.get('capacity', 60) or 60)
+            
+            if lab_id:
+                lab = LabRoom.objects.get(id=int(lab_id))
+                lab.room_code = room_code or lab.room_code
+                lab.name = lab_name or lab.name
+                lab.capacity = capacity
+                lab.save()
+                kept_lab_ids.add(lab.id)
+            else:
+                if not room_code or not lab_name:
+                    continue  # skip empty rows
+                lab = LabRoom.objects.create(
+                    name=lab_name,
+                    room_code=room_code,
+                    capacity=capacity,
+                )
+                kept_lab_ids.add(lab.id)
+            
+            # Update restrictions — clear and recreate
+            LabRestriction.objects.filter(lab=lab).delete()
+            
+            for restriction in lab_data.get('restrictions', []):
+                prog_id = restriction.get('program_id')
+                year = restriction.get('year_of_study')
+                course_id = restriction.get('course_id')
+                course_code = restriction.get('course_code')
+                
+                # Clean types — JS may send empty strings
+                prog_id = int(prog_id) if prog_id else None
+                year = int(year) if year else None
+                # course_id is actually course_code (Course PK is a string)
+                # Accept either course_id or course_code from JS
+                course_pk = course_id or course_code or None
+                if course_pk:
+                    course_pk = str(course_pk).strip()
+                    if not Course.objects.filter(course_code=course_pk).exists():
+                        course_pk = None
+                
+                if prog_id or year or course_pk:  # Only create non-empty restrictions
+                    LabRestriction.objects.create(
+                        lab=lab,
+                        program_id=prog_id,
+                        year_of_study=year,
+                        course_id=course_pk,
+                    )
+        
+        # Deactivate labs that were removed from the UI
+        if kept_lab_ids:
+            LabRoom.objects.filter(is_active=True).exclude(id__in=kept_lab_ids).update(is_active=False)
+        
+        # Refresh labs data and return updated IDs
+        updated_labs = []
+        for lab in LabRoom.objects.filter(id__in=kept_lab_ids, is_active=True):
+            updated_labs.append({'id': lab.id, 'room_code': lab.room_code})
+        
+        # Save selected labs for config if config_id provided
+        if config_id and selected_lab_ids:
+            config = TimetableConfig.objects.get(id=int(config_id))
+            TimetableConfigLab.objects.filter(config=config).delete()
+            for lid in selected_lab_ids:
+                if int(lid) in kept_lab_ids:
+                    TimetableConfigLab.objects.create(config=config, lab_id=int(lid))
+        
+        return JsonResponse({'success': True, 'labs_saved': len(labs_data), 'labs': updated_labs})
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'error': str(e)}, status=400)
+
+
+@login_required
+@csrf_exempt
+def generate_timetables_from_config(request):
+    """
+    POST: Create actual Timetable + TimetableEntry records for all batches
+    from the wizard's configuration (reserved slots) PLUS auto-fill remaining
+    slots using the timetable engine.
+    """
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+    
+    try:
+        data = json.loads(request.body)
+        config_id = data.get('config_id')
+        effective_from = data.get('effective_from')
+        
+        if not config_id:
+            return JsonResponse({'error': 'config_id required'}, status=400)
+        
+        config = get_object_or_404(TimetableConfig, id=config_id)
+        
+        if config.is_generated:
+            return JsonResponse({'error': 'Timetables already generated from this config'}, status=400)
+        
+        from datetime import date as date_type
+        eff_date = datetime.strptime(effective_from, '%Y-%m-%d').date() if effective_from else date_type.today()
+        
+        # Use the auto-fill engine
+        from main_app.utils.timetable_engine import TimetableEngine
+        engine = TimetableEngine(config)
+        result = engine.generate(effective_date=eff_date)
+        
+        if not result['success']:
+            return JsonResponse({'error': result.get('error', 'Generation failed')}, status=400)
+        
+        return JsonResponse({
+            'success': True,
+            'timetables': result['timetables'],
+            'warnings': result['warnings'],
+            'redirect_url': reverse('manage_timetables'),
+        })
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=400)
+
+
+@login_required
+def api_preview_generation(request):
+    """AJAX GET: Preview what auto-generation would produce without saving."""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    config_id = request.GET.get('config_id')
+    if not config_id:
+        return JsonResponse({'error': 'config_id required'}, status=400)
+    
+    try:
+        config = TimetableConfig.objects.get(id=config_id)
+        from main_app.utils.timetable_engine import TimetableEngine
+        engine = TimetableEngine(config)
+        preview = engine.preview()
+        return JsonResponse({'success': True, 'preview': preview})
+    except TimetableConfig.DoesNotExist:
+        return JsonResponse({'error': 'Config not found'}, status=404)
+    except Exception as e:
+        return JsonResponse({'error': str(e)}, status=400)
+
+
+@login_required
+def api_get_labs_for_config(request):
+    """AJAX GET: Return labs selected for a config, or all active labs."""
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+    
+    config_id = request.GET.get('config_id')
+    
+    all_labs = LabRoom.objects.filter(is_active=True).prefetch_related(
+        'restrictions', 'restrictions__program', 'restrictions__course'
+    )
+    
+    selected_ids = set()
+    if config_id:
+        selected_ids = set(
+            TimetableConfigLab.objects.filter(config_id=config_id).values_list('lab_id', flat=True)
+        )
+    
+    labs_data = []
+    for lab in all_labs:
+        restrictions = []
+        for r in lab.restrictions.all():
+            restrictions.append({
+                'program_id': r.program_id,
+                'program_code': r.program.code if r.program else None,
+                'year_of_study': r.year_of_study,
+                'course_id': r.course_id,
+                'course_code': r.course.course_code if r.course else None,
+            })
+        labs_data.append({
+            'id': lab.id,
+            'room_code': lab.room_code,
+            'name': lab.name,
+            'capacity': lab.capacity,
+            'is_selected': lab.id in selected_ids if selected_ids else True,
+            'restrictions': restrictions,
+        })
+    
+    return JsonResponse({'labs': labs_data})
+
+
+@login_required
+def api_get_all_program_year_status(request):
+    """
+    AJAX GET: Return all program+year combinations that have active batches
+    in the current academic year, along with their config/reservation status.
+    Used by the multi-program wizard Step 2.
+    """
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+
+    current_year = AcademicYear.get_current()
+    current_semester = Semester.get_current()
+
+    if not current_year or not current_semester:
+        return JsonResponse({'error': 'No current academic year/semester configured'}, status=400)
+
+    # Get all distinct program+year combos that have active batches
+    from django.db.models import Count, Q
+    combos = (
+        ProgramBatch.objects.filter(academic_year=current_year, is_active=True)
+        .values('program__id', 'program__code', 'program__name', 'year_of_study')
+        .annotate(batch_count=Count('id'))
+        .order_by('program__code', 'year_of_study')
+    )
+
+    # Determine semester type from current semester (ODD or EVEN)
+    sem_type = current_semester.semester_type  # 'ODD' or 'EVEN'
+
+    results = []
+    for combo in combos:
+        prog_id = combo['program__id']
+        year = combo['year_of_study']
+
+        # Compute the correct semester for this year_of_study
+        # EVEN type: Year 1 -> sem 2, Year 2 -> sem 4, ...
+        # ODD type:  Year 1 -> sem 1, Year 2 -> sem 3, ...
+        if sem_type == 'EVEN':
+            target_sem_num = year * 2
+        else:
+            target_sem_num = (year - 1) * 2 + 1
+        year_semester = Semester.objects.filter(
+            academic_year=current_year, semester_number=target_sem_num
+        ).first() or current_semester
+
+        # Check if a TimetableConfig exists
+        config = TimetableConfig.objects.filter(
+            academic_year=current_year,
+            semester=year_semester,
+            program_id=prog_id,
+            year_of_study=year,
+        ).first()
+
+        # Count reservations if config exists
+        reserved = 0
+        blocked = 0
+        config_id = None
+        is_generated = False
+        if config:
+            config_id = config.id
+            is_generated = config.is_generated
+            reserved = config.reservations.filter(is_blocked=False).count()
+            blocked = config.reservations.filter(is_blocked=True).count()
+
+        # Check if timetable already exists
+        existing_timetables = Timetable.objects.filter(
+            academic_year=current_year,
+            semester=year_semester,
+            year=year,
+            program_batch__program_id=prog_id,
+            is_active=True,
+        ).count()
+
+        # Get batch names
+        batch_names = list(
+            ProgramBatch.objects.filter(
+                academic_year=current_year, program_id=prog_id,
+                year_of_study=year, is_active=True,
+            ).values_list('batch_name', flat=True).order_by('batch_name')
+        )
+
+        results.append({
+            'program_id': prog_id,
+            'program_code': combo['program__code'],
+            'program_name': combo['program__name'],
+            'year_of_study': year,
+            'batch_count': combo['batch_count'],
+            'batch_names': batch_names,
+            'config_id': config_id,
+            'semester_id': year_semester.id,
+            'reserved_count': reserved,
+            'blocked_count': blocked,
+            'is_generated': is_generated,
+            'existing_timetables': existing_timetables,
+        })
+
+    return JsonResponse({
+        'success': True,
+        'academic_year': str(current_year),
+        'academic_year_id': current_year.id,
+        'semester_id': current_semester.id,
+        'semester_number': current_semester.semester_number,
+        'semester_type': current_semester.semester_type,  # 'ODD' or 'EVEN'
+        'combos': results,
+    })
+
+
+@login_required
+@csrf_exempt
+def api_delete_timetables(request):
+    """
+    POST: Delete all active timetables for a given academic year + semester + program + year,
+    and optionally reset the TimetableConfig.
+    """
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+
+    try:
+        data = json.loads(request.body)
+        scope = data.get('scope', 'program_year')  # 'program_year' or 'all'
+
+        current_year = AcademicYear.get_current()
+        current_semester = Semester.get_current()
+
+        if scope == 'all':
+            # Delete ALL active timetables for current academic year (any semester)
+            deleted_count = 0
+            timetables = Timetable.objects.filter(
+                academic_year=current_year,
+                is_active=True,
+            )
+            for tt in timetables:
+                tt.entries.all().delete()
+                tt.delete()
+                deleted_count += 1
+
+            # Reset all configs for this academic year
+            TimetableConfig.objects.filter(
+                academic_year=current_year,
+            ).update(is_generated=False)
+
+            return JsonResponse({'success': True, 'deleted': deleted_count})
+
+        else:
+            # Delete for specific program + year
+            program_id = data.get('program_id')
+            year_of_study = data.get('year_of_study')
+            if not program_id or not year_of_study:
+                return JsonResponse({'error': 'program_id and year_of_study required'}, status=400)
+
+            # Compute the correct semester for this year_of_study
+            sem_type = current_semester.semester_type
+            yr = int(year_of_study)
+            target_sem_num = yr * 2 if sem_type == 'EVEN' else (yr - 1) * 2 + 1
+            year_semester = Semester.objects.filter(
+                academic_year=current_year, semester_number=target_sem_num
+            ).first() or current_semester
+
+            deleted_count = 0
+            timetables = Timetable.objects.filter(
+                academic_year=current_year,
+                year=yr,
+                program_batch__program_id=int(program_id),
+                is_active=True,
+            )
+            for tt in timetables:
+                tt.entries.all().delete()
+                tt.delete()
+                deleted_count += 1
+
+            # Reset config
+            TimetableConfig.objects.filter(
+                academic_year=current_year,
+                semester=year_semester,
+                program_id=int(program_id),
+                year_of_study=yr,
+            ).update(is_generated=False)
+
+            return JsonResponse({'success': True, 'deleted': deleted_count})
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'error': str(e)}, status=400)
+
+
+@login_required
+@csrf_exempt
+def api_generate_all_timetables(request):
+    """
+    POST: Generate timetables for ALL program+year configs at once.
+    This ensures cross-program faculty conflict detection.
+    """
+    if not check_hod_permission(request.user):
+        return JsonResponse({'error': 'Permission denied'}, status=403)
+
+    if request.method != 'POST':
+        return JsonResponse({'error': 'POST required'}, status=405)
+
+    try:
+        current_year = AcademicYear.get_current()
+        current_semester = Semester.get_current()
+
+        if not current_year or not current_semester:
+            return JsonResponse({'error': 'No current academic year/semester configured'}, status=400)
+
+        # Get all configs for current academic year + semester
+        configs = TimetableConfig.objects.filter(
+            academic_year=current_year,
+            semester=current_semester,
+        ).select_related('program').order_by('program__code', 'year_of_study')
+
+        # Also auto-create configs for program+year combos that have batches but no config yet
+        combos_with_batches = (
+            ProgramBatch.objects.filter(academic_year=current_year, is_active=True)
+            .values('program_id', 'year_of_study')
+            .distinct()
+        )
+
+        existing_config_keys = set(
+            (c.program_id, c.year_of_study) for c in configs
+        )
+
+        for combo in combos_with_batches:
+            key = (combo['program_id'], combo['year_of_study'])
+            if key not in existing_config_keys:
+                TimetableConfig.objects.create(
+                    academic_year=current_year,
+                    semester=current_semester,
+                    program_id=combo['program_id'],
+                    year_of_study=combo['year_of_study'],
+                    created_by=request.user,
+                )
+
+        # Re-fetch all configs
+        configs = TimetableConfig.objects.filter(
+            academic_year=current_year,
+            semester=current_semester,
+        ).select_related('program').order_by('program__code', 'year_of_study')
+
+        from main_app.utils.timetable_engine import TimetableEngine
+        result = TimetableEngine.generate_all(configs, created_by=request.user)
+
+        if not result['success']:
+            return JsonResponse({'error': result.get('error', 'Generation failed')}, status=400)
+
+        return JsonResponse({
+            'success': True,
+            'timetables': result['timetables'],
+            'warnings': result['warnings'],
+            'redirect_url': reverse('manage_timetables'),
+        })
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return JsonResponse({'error': str(e)}, status=400)

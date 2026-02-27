@@ -8,7 +8,8 @@ from .models import (
     LeaveRequest, Feedback, Event, EventRegistration,
     Notification, Announcement, ElectiveVertical, ElectiveCourseOffering,
     ExamSchedule, StructuredQuestionPaper, QPQuestion,
-    Program, ProgramBatch, AdmissionBatch
+    Program, ProgramBatch, AdmissionBatch,
+    LabRoom, LabRestriction, TimetableConfig, FixedSlotReservation
 )
 
 
@@ -498,4 +499,41 @@ class QPQuestionAdmin(admin.ModelAdmin):
     def get_qp_course(self, obj):
         return obj.question_paper.course.course_code
     get_qp_course.short_description = 'Course'
+
+
+# =============================================================================
+# TIMETABLE WIZARD ADMINS
+# =============================================================================
+
+class LabRestrictionInline(admin.TabularInline):
+    model = LabRestriction
+    extra = 1
+    fields = ('program', 'year_of_study')
+
+
+@admin.register(LabRoom)
+class LabRoomAdmin(admin.ModelAdmin):
+    list_display = ('room_code', 'name', 'capacity', 'is_active', 'restriction_count')
+    list_filter = ('is_active',)
+    search_fields = ('name', 'room_code')
+    inlines = [LabRestrictionInline]
+    
+    def restriction_count(self, obj):
+        return obj.restrictions.count()
+    restriction_count.short_description = 'Restrictions'
+
+
+@admin.register(TimetableConfig)
+class TimetableConfigAdmin(admin.ModelAdmin):
+    list_display = ('academic_year', 'semester', 'program', 'year_of_study', 'is_generated', 'created_at')
+    list_filter = ('academic_year', 'is_generated')
+    search_fields = ('program__code',)
+
+
+@admin.register(FixedSlotReservation)
+class FixedSlotReservationAdmin(admin.ModelAdmin):
+    list_display = ('config', 'batch', 'day', 'time_slot', 'course', 'faculty', 'apply_to_all_batches')
+    list_filter = ('day', 'apply_to_all_batches')
+    search_fields = ('course__course_code',)
+    raw_id_fields = ('config', 'batch', 'course', 'faculty')
 
