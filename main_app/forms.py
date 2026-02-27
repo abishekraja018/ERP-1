@@ -160,12 +160,15 @@ class StudentRegistrationForm(FormSettings):
     entry_type = forms.ChoiceField(choices=ENTRY_TYPE_CHOICES, label='Entry Type',
                                    help_text='Regular = 1st sem (uses current reg). Lateral = 3rd sem (uses reg of batch started 1 year ago).')
     
-    # Optional fields
+    # Optional fields (same as bulk upload)
     phone = forms.CharField(max_length=15, required=False, label='Phone Number')
+    parent_name = forms.CharField(max_length=200, required=False, label='Parent/Guardian Name')
+    parent_phone = forms.CharField(max_length=15, required=False, label='Parent/Guardian Phone')
+    address = forms.CharField(widget=forms.Textarea, required=False, label='Address')
     
     class Meta:
         model = Student_Profile
-        fields = ['register_no', 'batch_label', 'branch', 'program_type', 'entry_type']
+        fields = ['register_no', 'batch_label', 'branch', 'program_type', 'entry_type', 'parent_name', 'parent_phone']
     
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

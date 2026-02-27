@@ -365,6 +365,7 @@ def add_student(request):
                     role='STUDENT',
                     gender=form.cleaned_data['gender'],
                     phone=form.cleaned_data.get('phone') or None,
+                    address=form.cleaned_data.get('address') or None,
                     is_active=True
                 )
                 # Mark password as unusable until student sets it
@@ -386,6 +387,8 @@ def add_student(request):
                 student.entry_type = entry_type
                 student.admission_year = admission_year
                 student.current_sem = current_sem
+                student.parent_name = form.cleaned_data.get('parent_name') or None
+                student.parent_phone = form.cleaned_data.get('parent_phone') or None
                 
                 # Auto-assign regulation using ProgramRegulation mapping
                 # REGULAR: joins as 1st year → follows regulation of their admission year
